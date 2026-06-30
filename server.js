@@ -317,7 +317,7 @@ app.get('/api/inbox', auth, async (req, res) => {
   for (const r of inbound) {
     const p = r.from;
     if (!m[p]) m[p] = { phone: p, messages: [], lastActivity: '', hasReplied: true, replyType: r.type };
-    m[p].messages.push({ dir: 'in', text: r.text, ts: r.timestamp, type: r.type });
+    m[p].messages.push({ dir: 'in', text: r.text, ts: r.timestamp, type: r.type, to: r.to });
     m[p].hasReplied = true; m[p].replyType = r.type;
     if (r.timestamp > m[p].lastActivity) m[p].lastActivity = r.timestamp;
   }

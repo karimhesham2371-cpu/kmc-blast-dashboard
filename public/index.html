@@ -673,11 +673,15 @@ function openConv(phone) {
     </div>
   `;
 
-  // Auto-select the from number that was used to contact this person
+  // Auto-select the KMC number used in this conversation:
+  // 1st choice: from number of the last outbound message
+  // 2nd choice: the KMC number that received their inbound reply (r.to)
   const lastOut = [...conv.messages].reverse().find(m => m.dir === 'out' && m.from);
-  if (lastOut?.from) {
+  const lastIn  = [...conv.messages].reverse().find(m => m.dir === 'in'  && m.to);
+  const smartFrom = lastOut?.from || lastIn?.to;
+  if (smartFrom) {
     const sel = document.getElementById('reply-from');
-    if (sel) sel.value = lastOut.from;
+    if (sel) sel.value = smartFrom;
   }
 
   // Scroll to bottom
