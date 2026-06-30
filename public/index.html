@@ -684,10 +684,15 @@ function openConv(phone) {
     <div class="thread-messages" id="thread-msgs">
       ${conv.messages.map(m => {
         const out = m.dir === 'out';
-        const dataAttrs = `data-id="${m.id||''}" data-dir="${m.dir}" data-phone="${esc(phone)}" data-text="${esc(m.text)}" data-type="${m.type||''}"`;
         return `<div>
           ${out ? `<div class="msg-from" style="text-align:right">${KMC_LABELS[m.from]||m.from||''}</div>` : ''}
-          <div class="msg ${out?'msg-out':'msg-in'}" ${dataAttrs} oncontextmenu="showCtxMenu(event,this)">${esc(m.text)}</div>
+          <div class="msg ${out?'msg-out':'msg-in'}"
+            data-id="${m.id||''}"
+            data-dir="${m.dir}"
+            data-phone="${esc(phone)}"
+            data-text="${esc(m.text)}"
+            data-type="${m.type||''}"
+          >${esc(m.text)}</div>
           <div class="msg-time" style="text-align:${out?'right':'left'}">${fmtTs(m.ts)}</div>
         </div>`;
       }).join('')}
@@ -852,8 +857,6 @@ async function doManualSend() {
 let ctxTarget = null; // the message element being right-clicked
 
 function showCtxMenu(e, el) {
-  e.preventDefault();
-  e.stopPropagation();
   ctxTarget = el;
 
   const dir   = el.dataset.dir;   // 'in' or 'out'
@@ -889,10 +892,20 @@ function closeCtxMenu() {
   ctxTarget = null;
 }
 
-// Close menu on any click outside
-document.addEventListener('click', closeCtxMenu);
+// Single delegated contextmenu listener — handles all .msg right-clicks
 document.addEventListener('contextmenu', e => {
-  if (!e.target.closest('.msg')) closeCtxMenu();
+  const msgEl = e.target.closest('.msg');
+  if (msgEl) {
+    e.preventDefault();
+    e.stopPropagation();
+    showCtxMenu(e, msgEl);
+  } else {
+    closeCtxMenu();
+  }
+});
+// Close on any left-click outside the menu
+document.addEventListener('click', e => {
+  if (!e.target.closest('#ctx-menu')) closeCtxMenu();
 });
 
 // ── Context actions ────────────────────────────────────────────────────────────
