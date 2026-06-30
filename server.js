@@ -311,13 +311,13 @@ app.get('/api/inbox', auth, async (req, res) => {
   for (const r of outbound) {
     if (!r.to) continue;
     if (!m[r.to]) m[r.to] = { phone: r.to, messages: [], lastActivity: '', hasReplied: false, replyType: null };
-    m[r.to].messages.push({ dir: 'out', text: r.text, ts: r.sent_at, from: r.from });
+    m[r.to].messages.push({ id: r.id, dir: 'out', text: r.text, ts: r.sent_at, from: r.from });
     if (r.sent_at > m[r.to].lastActivity) m[r.to].lastActivity = r.sent_at;
   }
   for (const r of inbound) {
     const p = r.from;
     if (!m[p]) m[p] = { phone: p, messages: [], lastActivity: '', hasReplied: true, replyType: r.type };
-    m[p].messages.push({ dir: 'in', text: r.text, ts: r.timestamp, type: r.type, to: r.to });
+    m[p].messages.push({ id: r.id, dir: 'in', text: r.text, ts: r.timestamp, type: r.type, to: r.to });
     m[p].hasReplied = true; m[p].replyType = r.type;
     if (r.timestamp > m[p].lastActivity) m[p].lastActivity = r.timestamp;
   }
@@ -341,6 +341,22 @@ app.post('/api/send', auth, async (req, res) => {
   const r = await sendSMS(from, to, text);
   if (r.ok) await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'sent', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
   res.json({ ok: r.ok, id: r.id, status: r.status });
+});
+
+// Delete a single message (inbound from kmc_replies, outbound from kmc_outbound)
+app.delete('/api/messages/:id', auth, async (req, res) => {
+  const { dir } = req.query; // 'in' or 'out'
+  const table = dir === 'out' ? 'kmc_outbound' : 'kmc_replies';
+  await sb.del(table, `id=eq.${req.params.id}`);
+  res.json({ ok: true });
+});
+
+// Reclassify an inbound message type (yes / no / other)
+app.patch('/api/messages/:id/type', auth, async (req, res) => {
+  const { type } = req.body;
+  if (!['yes','no','other'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
+  await sb.patch('kmc_replies', `id=eq.${req.params.id}`, { type });
+  res.json({ ok: true });
 });
 
 // Opt-outs

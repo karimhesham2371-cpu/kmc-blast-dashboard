@@ -165,6 +165,17 @@ textarea.form-input{resize:vertical;min-height:100px;font-family:inherit}
 .upload-zone:hover{border-color:var(--green);background:var(--green-dim)}
 .upload-zone input{display:none}
 
+/* ── Context menu ── */
+#ctx-menu{position:fixed;z-index:8000;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:6px;min-width:210px;box-shadow:0 8px 32px rgba(0,0,0,.5);display:none}
+#ctx-menu.open{display:block}
+.ctx-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:6px;font-size:13px;cursor:pointer;color:var(--text);border:none;background:none;width:100%;text-align:left;transition:background .1s}
+.ctx-item:hover{background:var(--card)}
+.ctx-item.danger{color:var(--red)}
+.ctx-item.danger:hover{background:rgba(239,68,68,.1)}
+.ctx-item.green{color:var(--green)}
+.ctx-item.green:hover{background:var(--green-dim)}
+.ctx-divider{height:1px;background:var(--border);margin:4px 0}
+
 /* ── Misc ── */
 .back-btn{display:inline-flex;align-items:center;gap:6px;font-size:14px;color:var(--muted);cursor:pointer;margin-bottom:12px}
 .back-btn:hover{color:var(--text)}
@@ -236,6 +247,22 @@ textarea.form-input{resize:vertical;min-height:100px;font-family:inherit}
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- Right-click context menu -->
+<div id="ctx-menu">
+  <button class="ctx-item" id="ctx-copy-msg">📋 Copy message</button>
+  <button class="ctx-item" id="ctx-copy-phone">📞 Copy phone number</button>
+  <div class="ctx-divider"></div>
+  <button class="ctx-item green" id="ctx-mark-yes">✅ Mark as YES</button>
+  <button class="ctx-item" id="ctx-mark-no" style="color:var(--red)">❌ Mark as NO</button>
+  <button class="ctx-item" id="ctx-mark-other">○ Mark as Other</button>
+  <div class="ctx-divider"></div>
+  <button class="ctx-item" id="ctx-reply-now">↗ Quick Reply</button>
+  <button class="ctx-item" id="ctx-open-send">✉️ Open in Manual Send</button>
+  <div class="ctx-divider"></div>
+  <button class="ctx-item danger" id="ctx-block">🚫 Block this number</button>
+  <button class="ctx-item danger" id="ctx-delete-msg">🗑 Delete message</button>
+</div>
 
 <script>
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -657,9 +684,10 @@ function openConv(phone) {
     <div class="thread-messages" id="thread-msgs">
       ${conv.messages.map(m => {
         const out = m.dir === 'out';
+        const dataAttrs = `data-id="${m.id||''}" data-dir="${m.dir}" data-phone="${esc(phone)}" data-text="${esc(m.text)}" data-type="${m.type||''}"`;
         return `<div>
           ${out ? `<div class="msg-from" style="text-align:right">${KMC_LABELS[m.from]||m.from||''}</div>` : ''}
-          <div class="msg ${out?'msg-out':'msg-in'}">${esc(m.text)}</div>
+          <div class="msg ${out?'msg-out':'msg-in'}" ${dataAttrs} oncontextmenu="showCtxMenu(event,this)">${esc(m.text)}</div>
           <div class="msg-time" style="text-align:${out?'right':'left'}">${fmtTs(m.ts)}</div>
         </div>`;
       }).join('')}
@@ -817,6 +845,138 @@ async function doManualSend() {
     toast(r.error || 'Send failed', 'error');
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RIGHT-CLICK CONTEXT MENU
+// ─────────────────────────────────────────────────────────────────────────────
+let ctxTarget = null; // the message element being right-clicked
+
+function showCtxMenu(e, el) {
+  e.preventDefault();
+  e.stopPropagation();
+  ctxTarget = el;
+
+  const dir   = el.dataset.dir;   // 'in' or 'out'
+  const id    = el.dataset.id;
+  const phone = el.dataset.phone;
+  const text  = el.dataset.text;
+  const type  = el.dataset.type;
+
+  // Show/hide mark options only for inbound messages
+  const markSection = document.querySelectorAll('#ctx-mark-yes, #ctx-mark-no, #ctx-mark-other, #ctx-mark-yes + .ctx-divider');
+  document.getElementById('ctx-mark-yes').parentElement.querySelectorAll('.ctx-item[id^="ctx-mark"]').forEach(b => {
+    b.style.display = dir === 'in' ? '' : 'none';
+  });
+  // Highlight current type
+  ['yes','no','other'].forEach(t => {
+    const btn = document.getElementById('ctx-mark-' + t);
+    if (btn) btn.style.fontWeight = (type === t) ? '700' : '';
+  });
+
+  // Position the menu near cursor (keep it inside viewport)
+  const menu = document.getElementById('ctx-menu');
+  menu.classList.add('open');
+  const mw = 220, mh = menu.offsetHeight || 280;
+  let x = e.clientX, y = e.clientY;
+  if (x + mw > window.innerWidth)  x = window.innerWidth  - mw - 8;
+  if (y + mh > window.innerHeight) y = window.innerHeight - mh - 8;
+  menu.style.left = x + 'px';
+  menu.style.top  = y + 'px';
+}
+
+function closeCtxMenu() {
+  document.getElementById('ctx-menu').classList.remove('open');
+  ctxTarget = null;
+}
+
+// Close menu on any click outside
+document.addEventListener('click', closeCtxMenu);
+document.addEventListener('contextmenu', e => {
+  if (!e.target.closest('.msg')) closeCtxMenu();
+});
+
+// ── Context actions ────────────────────────────────────────────────────────────
+
+document.getElementById('ctx-copy-msg').onclick = () => {
+  if (!ctxTarget) return;
+  navigator.clipboard.writeText(ctxTarget.dataset.text).then(() => toast('Message copied ✓'));
+  closeCtxMenu();
+};
+
+document.getElementById('ctx-copy-phone').onclick = () => {
+  if (!ctxTarget) return;
+  navigator.clipboard.writeText(ctxTarget.dataset.phone).then(() => toast('Phone number copied ✓'));
+  closeCtxMenu();
+};
+
+document.getElementById('ctx-mark-yes').onclick   = () => ctxReclassify('yes');
+document.getElementById('ctx-mark-no').onclick    = () => ctxReclassify('no');
+document.getElementById('ctx-mark-other').onclick = () => ctxReclassify('other');
+
+async function ctxReclassify(type) {
+  if (!ctxTarget || ctxTarget.dataset.dir !== 'in') return;
+  const id = ctxTarget.dataset.id;
+  if (!id) { toast('Cannot reclassify — no ID', 'error'); closeCtxMenu(); return; }
+  await apiJ(`/api/messages/${id}/type`, { method:'PATCH', body: { type } });
+  toast(`Marked as ${type.toUpperCase()} ✓`);
+  closeCtxMenu();
+  const phone = ctxTarget.dataset.phone;
+  await refreshInbox();
+  openConv(phone);
+}
+
+document.getElementById('ctx-reply-now').onclick = () => {
+  if (!ctxTarget) return;
+  const phone = ctxTarget.dataset.phone;
+  closeCtxMenu();
+  // Focus the reply textarea
+  const ta = document.getElementById('reply-text');
+  if (ta) { ta.focus(); return; }
+  // If thread isn't open, open it
+  openConv(phone);
+  setTimeout(() => document.getElementById('reply-text')?.focus(), 100);
+};
+
+document.getElementById('ctx-open-send').onclick = () => {
+  if (!ctxTarget) return;
+  const phone = ctxTarget.dataset.phone;
+  closeCtxMenu();
+  nav('send');
+  setTimeout(() => {
+    const to = document.getElementById('send-to');
+    if (to) { to.value = phone; }
+    // Pre-fill from with the last KMC number used in this convo
+    const conv = inboxData.find(c => c.phone === phone);
+    if (conv) {
+      const lastOut = [...conv.messages].reverse().find(m => m.dir === 'out' && m.from);
+      const lastIn  = [...conv.messages].reverse().find(m => m.dir === 'in'  && m.to);
+      const sf = lastOut?.from || lastIn?.to;
+      if (sf) { const sel = document.getElementById('send-from'); if (sel) sel.value = sf; }
+    }
+  }, 120);
+};
+
+document.getElementById('ctx-block').onclick = async () => {
+  if (!ctxTarget) return;
+  const phone = ctxTarget.dataset.phone;
+  if (!confirm(`Block ${phone} and add to opt-out list? They will never be texted again.`)) { closeCtxMenu(); return; }
+  const r = await apiJ('/api/opt-outs', { method:'POST', body: { phone, reason: 'Blocked via inbox' } });
+  closeCtxMenu();
+  if (r.ok) toast(`🚫 ${phone} blocked ✓`);
+  else toast(r.error || 'Error blocking', 'error');
+};
+
+document.getElementById('ctx-delete-msg').onclick = async () => {
+  if (!ctxTarget) return;
+  const { id, dir, phone } = ctxTarget.dataset;
+  if (!id) { toast('Cannot delete — no message ID', 'error'); closeCtxMenu(); return; }
+  if (!confirm('Delete this message? This cannot be undone.')) { closeCtxMenu(); return; }
+  await apiJ(`/api/messages/${id}?dir=${dir}`, { method:'DELETE' });
+  toast('Message deleted');
+  closeCtxMenu();
+  await refreshInbox();
+  openConv(phone);
+};
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 tryAutoLogin();
