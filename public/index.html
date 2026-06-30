@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KMCashOffers — Blast Dashboard</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--sidebar:#161b22;--card:#1c2333;--card2:#21262d;
+  --border:rgba(255,255,255,0.08);--green:#22c55e;--green-dim:rgba(34,197,94,0.15);
+  --red:#ef4444;--yellow:#f59e0b;--blue:#58a6ff;
+  --text:#e2e8f0;--muted:#8b949e;--font:'Inter',system-ui,sans-serif;
+}
+body{font-family:var(--font);background:var(--bg);color:var(--text);height:100vh;overflow:hidden}
+input,textarea,select,button{font-family:inherit}
+a{color:inherit;text-decoration:none}
+
+/* ── Login ── */
+#login{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:9999}
+.login-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:48px 40px;width:360px;text-align:center}
+.login-logo{width:56px;height:56px;background:var(--green);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:900;color:#000;margin:0 auto 20px}
+.login-box h2{font-size:22px;font-weight:700;margin-bottom:6px}
+.login-box p{color:var(--muted);font-size:14px;margin-bottom:28px}
+.login-box input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 16px;color:var(--text);font-size:15px;outline:none;margin-bottom:12px;transition:border .2s}
+.login-box input:focus{border-color:var(--green)}
+.login-box button{width:100%;background:var(--green);color:#000;border:none;border-radius:8px;padding:13px;font-size:15px;font-weight:700;cursor:pointer}
+.login-box button:hover{background:#16a34a}
+.login-err{color:var(--red);font-size:13px;margin-top:10px;min-height:18px}
+
+/* ── Layout ── */
+#app{display:flex;height:100vh;overflow:hidden}
+
+/* ── Sidebar ── */
+.sidebar{width:220px;min-width:220px;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
+.sidebar-brand{padding:20px 18px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.brand-badge{background:var(--green);color:#000;font-size:11px;font-weight:900;padding:4px 8px;border-radius:6px;letter-spacing:.05em}
+.brand-name{font-size:15px;font-weight:700;color:var(--text)}
+.sidebar-nav{padding:10px 8px;flex:1}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;font-size:14px;color:var(--muted);cursor:pointer;transition:all .15s;margin-bottom:2px;border:none;background:none;width:100%;text-align:left}
+.nav-item:hover{background:var(--card);color:var(--text)}
+.nav-item.active{background:var(--green-dim);color:var(--green);font-weight:600}
+.nav-item svg{flex-shrink:0;opacity:.7}
+.nav-item.active svg{opacity:1}
+.nav-badge{background:var(--green);color:#000;font-size:10px;font-weight:700;padding:2px 6px;border-radius:20px;margin-left:auto}
+.sidebar-footer{padding:14px 16px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)}
+
+/* ── Main ── */
+.main{flex:1;overflow-y:auto;display:flex;flex-direction:column}
+.view{flex:1;padding:28px 32px;display:none;flex-direction:column;gap:24px}
+.view.active{display:flex}
+.view-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.view-title{font-size:22px;font-weight:700}
+.view-sub{color:var(--muted);font-size:14px;margin-top:2px}
+
+/* ── Cards / Grid ── */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:16px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}
+.stat-label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.stat-value{font-size:32px;font-weight:700;line-height:1}
+.stat-value.green{color:var(--green)}
+.stat-value.red{color:var(--red)}
+.stat-value.yellow{color:var(--yellow)}
+.stat-value.blue{color:var(--blue)}
+
+/* ── Buttons ── */
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .15s}
+.btn-primary{background:var(--green);color:#000;border-color:var(--green)}
+.btn-primary:hover{background:#16a34a}
+.btn-ghost{background:transparent;color:var(--muted);border-color:var(--border)}
+.btn-ghost:hover{background:var(--card2);color:var(--text)}
+.btn-danger{background:transparent;color:var(--red);border-color:rgba(239,68,68,.3)}
+.btn-danger:hover{background:rgba(239,68,68,.1)}
+.btn-yellow{background:transparent;color:var(--yellow);border-color:rgba(245,158,11,.3)}
+.btn-yellow:hover{background:rgba(245,158,11,.1)}
+.btn-blue{background:rgba(88,166,255,.1);color:var(--blue);border-color:rgba(88,166,255,.25)}
+.btn-blue:hover{background:rgba(88,166,255,.2)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn-sm{padding:6px 12px;font-size:12px}
+
+/* ── Table ── */
+.table-wrap{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+table{width:100%;border-collapse:collapse}
+th{padding:11px 16px;text-align:left;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)}
+td{padding:12px 16px;font-size:14px;border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.02)}
+
+/* ── Status badges ── */
+.badge{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:600}
+.badge-green{background:var(--green-dim);color:var(--green)}
+.badge-red{background:rgba(239,68,68,.12);color:var(--red)}
+.badge-yellow{background:rgba(245,158,11,.12);color:var(--yellow)}
+.badge-blue{background:rgba(88,166,255,.12);color:var(--blue)}
+.badge-gray{background:rgba(139,148,158,.12);color:var(--muted)}
+.badge::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor}
+
+/* ── Progress bar ── */
+.progress-wrap{background:var(--bg);border-radius:4px;height:6px;overflow:hidden;min-width:80px}
+.progress-bar{height:100%;background:var(--green);border-radius:4px;transition:width .3s}
+
+/* ── Modal ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:1000;backdrop-filter:blur(2px)}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:32px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto}
+.modal-title{font-size:18px;font-weight:700;margin-bottom:24px}
+.form-row{margin-bottom:16px}
+.form-label{display:block;font-size:13px;font-weight:600;color:var(--muted);margin-bottom:6px}
+.form-input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text);font-size:14px;outline:none;transition:border .2s}
+.form-input:focus{border-color:var(--green)}
+textarea.form-input{resize:vertical;min-height:100px;font-family:inherit}
+.form-hint{font-size:12px;color:var(--muted);margin-top:5px}
+.modal-actions{display:flex;gap:10px;margin-top:24px;justify-content:flex-end}
+
+/* ── Campaign detail ── */
+.camp-detail{display:flex;flex-direction:column;gap:20px}
+.camp-stats-row{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+.camp-stat{background:var(--card2);border-radius:10px;padding:14px 16px;text-align:center}
+.camp-stat-val{font-size:24px;font-weight:700}
+.camp-stat-lbl{font-size:11px;color:var(--muted);margin-top:4px;text-transform:uppercase;letter-spacing:.05em}
+.camp-actions{display:flex;gap:10px;flex-wrap:wrap}
+.detail-section{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}
+.detail-section-title{font-size:14px;font-weight:600;margin-bottom:16px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.edit-form{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.edit-form .full{grid-column:1/-1}
+
+/* ── Inbox ── */
+.inbox-layout{display:flex;flex:1;overflow:hidden;background:var(--card);border:1px solid var(--border);border-radius:12px;min-height:0}
+.conv-list{width:300px;min-width:300px;border-right:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
+.conv-search{padding:12px;border-bottom:1px solid var(--border)}
+.conv-search input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none}
+.conv-search input:focus{border-color:var(--green)}
+.conv-item{padding:14px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.conv-item:hover{background:var(--card2)}
+.conv-item.active{background:var(--green-dim);border-left:3px solid var(--green)}
+.conv-phone{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
+.conv-preview{font-size:12px;color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+.conv-time{font-size:11px;color:var(--muted);margin-left:auto;white-space:nowrap}
+.conv-empty{padding:40px;text-align:center;color:var(--muted);font-size:14px}
+.thread-panel{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.thread-header{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.thread-phone{font-size:16px;font-weight:700}
+.thread-messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:10px}
+.thread-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px}
+.msg{max-width:72%;padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.5;word-break:break-word}
+.msg-out{background:var(--green-dim);border:1px solid rgba(34,197,94,.2);align-self:flex-end;border-bottom-right-radius:4px}
+.msg-in{background:var(--card2);border:1px solid var(--border);align-self:flex-start;border-bottom-left-radius:4px}
+.msg-time{font-size:11px;color:var(--muted);margin-top:4px}
+.msg-from{font-size:11px;color:var(--muted);margin-bottom:4px}
+.reply-bar{padding:14px 16px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:flex-end}
+.reply-bar select{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--text);font-size:13px;outline:none;cursor:pointer}
+.reply-bar textarea{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 13px;color:var(--text);font-size:14px;outline:none;resize:none;max-height:100px;min-height:42px;transition:border .2s;font-family:inherit}
+.reply-bar textarea:focus{border-color:var(--green)}
+
+/* ── Opt-outs ── */
+.optout-top{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.optout-top input{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 14px;color:var(--text);font-size:14px;outline:none;min-width:200px}
+.optout-top input:focus{border-color:var(--green)}
+
+/* ── Send view ── */
+.send-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px;max-width:560px}
+.char-count{font-size:12px;color:var(--muted);text-align:right;margin-top:4px}
+
+/* ── Upload drop zone ── */
+.upload-zone{border:2px dashed var(--border);border-radius:10px;padding:28px;text-align:center;cursor:pointer;transition:all .2s}
+.upload-zone:hover{border-color:var(--green);background:var(--green-dim)}
+.upload-zone input{display:none}
+
+/* ── Misc ── */
+.back-btn{display:inline-flex;align-items:center;gap:6px;font-size:14px;color:var(--muted);cursor:pointer;margin-bottom:12px}
+.back-btn:hover{color:var(--text)}
+.empty-state{text-align:center;padding:60px 20px;color:var(--muted)}
+.empty-state svg{margin-bottom:14px;opacity:.3}
+.empty-state p{font-size:15px}
+.toast{position:fixed;bottom:24px;right:24px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:14px 20px;font-size:14px;z-index:9000;transform:translateY(80px);opacity:0;transition:all .3s;max-width:320px}
+.toast.show{transform:translateY(0);opacity:1}
+.toast.success{border-color:var(--green);color:var(--green)}
+.toast.error{border-color:var(--red);color:var(--red)}
+.loader{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--green);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login">
+  <div class="login-box">
+    <div class="login-logo">KMC</div>
+    <h2>Blast Dashboard</h2>
+    <p>KMCashOffers SMS Command Center</p>
+    <input type="password" id="pass-input" placeholder="Access password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button onclick="doLogin()">Enter Dashboard</button>
+    <div class="login-err" id="login-err"></div>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app" style="display:none">
+  <nav class="sidebar">
+    <div class="sidebar-brand">
+      <span class="login-logo" style="width:32px;height:32px;font-size:12px;margin:0;border-radius:8px;display:inline-flex;align-items:center;justify-content:center">KMC</span>
+      <span class="brand-name">Blast HQ</span>
+    </div>
+    <div class="sidebar-nav">
+      <button class="nav-item active" onclick="nav('overview')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        Overview
+      </button>
+      <button class="nav-item" onclick="nav('campaigns')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        Campaigns
+      </button>
+      <button class="nav-item" onclick="nav('inbox')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        Inbox
+        <span class="nav-badge" id="inbox-badge" style="display:none"></span>
+      </button>
+      <button class="nav-item" onclick="nav('optouts')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+        Opt-Outs
+      </button>
+      <button class="nav-item" onclick="nav('send')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        Manual Send
+      </button>
+    </div>
+    <div class="sidebar-footer">KMCashOffers · 5 numbers</div>
+  </nav>
+
+  <main class="main">
+    <div id="view-overview" class="view active"></div>
+    <div id="view-campaigns" class="view"></div>
+    <div id="view-inbox" class="view" style="padding:0;overflow:hidden"></div>
+    <div id="view-optouts" class="view"></div>
+    <div id="view-send" class="view"></div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let TOKEN = '';
+let currentView = 'overview';
+let inboxData = [];
+let activeConv = null;
+let inboxSearch = '';
+let inboxRefreshTimer = null;
+const KMC_NUMBERS = ['+12109856004','+17869499467','+14709320125','+19163474799','+13126752435'];
+const KMC_LABELS  = {
+  '+12109856004': 'San Antonio TX',
+  '+17869499467': 'Miami FL',
+  '+14709320125': 'Atlanta GA',
+  '+19163474799': 'Sacramento CA',
+  '+13126752435': 'Chicago IL',
+};
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+async function doLogin() {
+  const pass = document.getElementById('pass-input').value;
+  if (!pass) return;
+  try {
+    const r = await fetch('/api/stats', { headers: { 'x-dash-token': pass } });
+    if (r.status === 401) { document.getElementById('login-err').textContent = 'Wrong password.'; return; }
+    TOKEN = pass;
+    localStorage.setItem('kmc_token', pass);
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('app').style.display   = 'flex';
+    init();
+  } catch(e) { document.getElementById('login-err').textContent = 'Connection error.'; }
+}
+
+async function tryAutoLogin() {
+  const saved = localStorage.getItem('kmc_token');
+  if (!saved) return;
+  try {
+    const r = await fetch('/api/stats', { headers: { 'x-dash-token': saved } });
+    if (r.ok) {
+      TOKEN = saved;
+      document.getElementById('login').style.display = 'none';
+      document.getElementById('app').style.display   = 'flex';
+      init();
+    }
+  } catch{}
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'x-dash-token': TOKEN, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    body: opts.body && typeof opts.body === 'object' ? JSON.stringify(opts.body) : opts.body,
+  });
+  if (res.status === 401) { localStorage.removeItem('kmc_token'); location.reload(); }
+  return res;
+}
+
+async function apiJ(path, opts) { const r = await api(path, opts); return r.json(); }
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg, type = 'success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = `toast show ${type}`;
+  setTimeout(() => t.className = 'toast', 3000);
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function nav(view) {
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  const btn = [...document.querySelectorAll('.nav-item')].find(el => el.getAttribute('onclick')?.includes(`'${view}'`));
+  if (btn) btn.classList.add('active');
+  document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+  document.getElementById(`view-${view}`).classList.add('active');
+  currentView = view;
+  if (inboxRefreshTimer) { clearInterval(inboxRefreshTimer); inboxRefreshTimer = null; }
+  if (view === 'overview')   renderOverview();
+  if (view === 'campaigns')  renderCampaigns();
+  if (view === 'inbox')      { renderInbox(); inboxRefreshTimer = setInterval(refreshInbox, 10000); }
+  if (view === 'optouts')    renderOptOuts();
+  if (view === 'send')       renderSend();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+function init() { nav('overview'); }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts), now = new Date();
+  const diff = now - d;
+  if (diff < 60000)   return 'just now';
+  if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
+  if (diff < 86400000)return Math.floor(diff/3600000) + 'h ago';
+  return d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+}
+function fmtTs(ts) {
+  if (!ts) return '';
+  return new Date(ts).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit', hour12:true });
+}
+function statusBadge(s) {
+  const map = { active:'green', draft:'gray', paused:'yellow', completed:'blue', pending:'gray', sent:'green', failed:'red', opted_out:'red', yes:'green', no:'red', other:'gray' };
+  return `<span class="badge badge-${map[s]||'gray'}">${s}</span>`;
+}
+function pct(a, b) { return b > 0 ? Math.round(a/b*100) : 0; }
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OVERVIEW
+// ─────────────────────────────────────────────────────────────────────────────
+async function renderOverview() {
+  const el = document.getElementById('view-overview');
+  el.innerHTML = `<div class="view-header"><div><div class="view-title">Overview</div><div class="view-sub">KMCashOffers SMS performance</div></div><button class="btn btn-ghost btn-sm" onclick="renderOverview()">↻ Refresh</button></div><div class="stats-grid" id="stats-grid"><div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--muted)"><div class="loader"></div></div></div>`;
+  const s = await apiJ('/api/stats');
+  document.getElementById('stats-grid').innerHTML = `
+    <div class="stat-card"><div class="stat-label">Sent Today</div><div class="stat-value green">${s.sent_today.toLocaleString()}</div></div>
+    <div class="stat-card"><div class="stat-label">Total Replies</div><div class="stat-value blue">${s.total_replies.toLocaleString()}</div></div>
+    <div class="stat-card"><div class="stat-label">YES Replies</div><div class="stat-value green">${s.yes_replies.toLocaleString()}</div></div>
+    <div class="stat-card"><div class="stat-label">NO / Declined</div><div class="stat-value red">${s.no_replies.toLocaleString()}</div></div>
+    <div class="stat-card"><div class="stat-label">Campaigns</div><div class="stat-value">${s.campaigns}</div></div>
+    <div class="stat-card"><div class="stat-label">Active</div><div class="stat-value green">${s.active}</div></div>
+    <div class="stat-card"><div class="stat-label">Total Contacts</div><div class="stat-value">${s.total_contacts.toLocaleString()}</div></div>
+    <div class="stat-card"><div class="stat-label">Opt-Outs</div><div class="stat-value red">${s.opt_outs.toLocaleString()}</div></div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CAMPAIGNS
+// ─────────────────────────────────────────────────────────────────────────────
+let campDetail = null;
+
+async function renderCampaigns() {
+  const el = document.getElementById('view-campaigns');
+  if (campDetail) { await renderCampDetail(campDetail); return; }
+  el.innerHTML = `<div class="view-header"><div><div class="view-title">Campaigns</div><div class="view-sub">Manage your SMS blast campaigns</div></div><button class="btn btn-primary" onclick="showCreateModal()">+ New Campaign</button></div><div class="table-wrap" id="camp-table"><div style="padding:40px;text-align:center"><div class="loader"></div></div></div>`;
+  const camps = await apiJ('/api/campaigns');
+  if (!camps.length) {
+    document.getElementById('camp-table').innerHTML = `<div class="empty-state"><svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><p>No campaigns yet. Create your first one.</p></div>`;
+    return;
+  }
+  document.getElementById('camp-table').innerHTML = `<table><thead><tr><th>Campaign</th><th>Status</th><th>Contacts</th><th>Progress</th><th>Daily Limit</th><th>Actions</th></tr></thead><tbody>${
+    camps.map(c => {
+      const p = pct(c.total_contacts - (c.sent_today||0), c.total_contacts);
+      return `<tr>
+        <td><div style="font-weight:600;cursor:pointer;color:var(--green)" onclick="openCamp(${c.id})">${esc(c.name)}</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${fmtTime(c.created_at)}</div></td>
+        <td>${statusBadge(c.status)}</td>
+        <td>${(c.total_contacts||0).toLocaleString()}</td>
+        <td><div style="display:flex;align-items:center;gap:8px"><div class="progress-wrap" style="flex:1"><div class="progress-bar" style="width:${pct(c.sent_today||0,c.total_contacts||1)}%"></div></div><span style="font-size:12px;color:var(--muted)">${c.sent_today||0}/${c.total_contacts||0}</span></div></td>
+        <td>${c.daily_limit||200}/day</td>
+        <td><div style="display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick="openCamp(${c.id})">Open</button>
+          ${c.status==='active' ? `<button class="btn btn-yellow btn-sm" onclick="pauseCamp(${c.id})">Pause</button>` : c.status==='paused'||c.status==='draft' ? `<button class="btn btn-primary btn-sm" onclick="activateCamp(${c.id})">Start</button>` : ''}
+          <button class="btn btn-danger btn-sm" onclick="deleteCamp(${c.id},'${esc(c.name)}')">Delete</button>
+        </div></td>
+      </tr>`;
+    }).join('')
+  }</tbody></table>`;
+}
+
+async function openCamp(id) { campDetail = id; await renderCampDetail(id); }
+
+async function renderCampDetail(id) {
+  const el = document.getElementById('view-campaigns');
+  el.innerHTML = `<div style="padding:40px;text-align:center"><div class="loader"></div></div>`;
+
+  const [camps, stats] = await Promise.all([
+    apiJ('/api/campaigns'),
+    apiJ(`/api/campaigns/${id}/stats`),
+  ]);
+  const c = camps.find(x => x.id == id);
+  if (!c) { campDetail = null; renderCampaigns(); return; }
+
+  const p = stats.total > 0 ? pct(stats.sent, stats.total) : 0;
+
+  el.innerHTML = `
+    <div>
+      <div class="back-btn" onclick="campDetail=null;renderCampaigns()">← Back to campaigns</div>
+      <div class="view-header">
+        <div><div class="view-title">${esc(c.name)}</div><div class="view-sub">Campaign details & controls</div></div>
+        ${statusBadge(c.status)}
+      </div>
+    </div>
+    <div class="camp-stats-row">
+      <div class="camp-stat"><div class="camp-stat-val">${stats.total.toLocaleString()}</div><div class="camp-stat-lbl">Total</div></div>
+      <div class="camp-stat"><div class="camp-stat-val" style="color:var(--muted)">${stats.pending.toLocaleString()}</div><div class="camp-stat-lbl">Pending</div></div>
+      <div class="camp-stat"><div class="camp-stat-val" style="color:var(--green)">${stats.sent.toLocaleString()}</div><div class="camp-stat-lbl">Sent</div></div>
+      <div class="camp-stat"><div class="camp-stat-val" style="color:var(--red)">${stats.failed.toLocaleString()}</div><div class="camp-stat-lbl">Failed</div></div>
+      <div class="camp-stat"><div class="camp-stat-val" style="color:var(--red)">${stats.opted_out.toLocaleString()}</div><div class="camp-stat-lbl">Opt-Out</div></div>
+    </div>
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;display:flex;align-items:center;gap:14px">
+      <div class="progress-wrap" style="flex:1;height:10px"><div class="progress-bar" style="width:${p}%"></div></div>
+      <span style="font-size:13px;color:var(--muted)">${p}% sent</span>
+    </div>
+    <div class="camp-actions">
+      ${c.status==='active'    ? `<button class="btn btn-yellow" onclick="pauseCamp(${c.id},true)">⏸ Pause</button>` : ''}
+      ${c.status!=='active'&&c.status!=='completed' ? `<button class="btn btn-primary" onclick="activateCamp(${c.id},true)">▶ Activate</button>` : ''}
+      ${c.status!=='completed' ? `<button class="btn btn-blue" onclick="blastNow(${c.id})" id="blast-btn">⚡ Blast Now</button>` : ''}
+      <button class="btn btn-ghost" onclick="renderCampDetail(${c.id})">↻ Refresh</button>
+      <button class="btn btn-danger" onclick="deleteCamp(${c.id},'${esc(c.name)}')">🗑 Delete</button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <!-- Edit -->
+      <div class="detail-section">
+        <div class="detail-section-title">Settings</div>
+        <div class="form-row">
+          <label class="form-label">Campaign Name</label>
+          <input class="form-input" id="edit-name" value="${esc(c.name)}">
+        </div>
+        <div class="form-row">
+          <label class="form-label">Daily Limit</label>
+          <input class="form-input" id="edit-limit" type="number" value="${c.daily_limit||200}">
+        </div>
+        <div class="form-row">
+          <label class="form-label">Message Template</label>
+          <textarea class="form-input" id="edit-msg" rows="5">${esc(c.message||'')}</textarea>
+          <div class="form-hint">Use {name} and {address} as placeholders</div>
+        </div>
+        <button class="btn btn-primary" onclick="saveEdit(${c.id})">Save Changes</button>
+      </div>
+
+      <!-- Upload -->
+      <div class="detail-section">
+        <div class="detail-section-title">Upload Contacts</div>
+        <div class="upload-zone" onclick="document.getElementById('csv-input').click()" id="upload-zone">
+          <input type="file" id="csv-input" accept=".csv" onchange="uploadCSV(${c.id})">
+          <svg width="36" height="36" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="margin-bottom:10px;opacity:.4"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <div style="font-size:14px;font-weight:600">Click to upload CSV</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:6px">Auto-detects: Phone, First Name, Address, City, State, Zip</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px">Opted-out numbers are automatically skipped</div>
+        </div>
+        <div id="upload-result" style="margin-top:14px"></div>
+      </div>
+    </div>
+
+    <!-- Contacts table -->
+    <div class="detail-section">
+      <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>Contacts</span>
+        <select id="filter-status" onchange="loadContacts(${c.id})" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 10px;color:var(--text);font-size:13px;outline:none;cursor:pointer">
+          <option value="">All</option>
+          <option value="pending">Pending</option>
+          <option value="sent">Sent</option>
+          <option value="failed">Failed</option>
+          <option value="opted_out">Opted Out</option>
+        </select>
+      </div>
+      <div id="contacts-table" style="margin-top:14px"><div class="loader"></div></div>
+    </div>
+  `;
+  loadContacts(id);
+}
+
+async function loadContacts(id) {
+  const status = document.getElementById('filter-status')?.value || '';
+  const el = document.getElementById('contacts-table');
+  if (!el) return;
+  el.innerHTML = '<div class="loader"></div>';
+  const contacts = await apiJ(`/api/campaigns/${id}/contacts?limit=100${status ? '&status='+status : ''}`);
+  if (!contacts.length) { el.innerHTML = '<div style="color:var(--muted);font-size:14px;padding:20px 0">No contacts found.</div>'; return; }
+  el.innerHTML = `<table><thead><tr><th>Phone</th><th>Name</th><th>Address</th><th>Status</th><th>Sent At</th><th>From</th></tr></thead><tbody>${
+    contacts.map(c => `<tr>
+      <td style="font-weight:600">${esc(c.phone)}</td>
+      <td>${esc(c.first_name)||'—'}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.address)||'—'}</td>
+      <td>${statusBadge(c.status)}</td>
+      <td style="font-size:12px;color:var(--muted)">${c.sent_at ? fmtTs(c.sent_at) : '—'}</td>
+      <td style="font-size:12px;color:var(--muted)">${c.assigned_from ? KMC_LABELS[c.assigned_from]||c.assigned_from : '—'}</td>
+    </tr>`).join('')
+  }</tbody></table><div style="font-size:12px;color:var(--muted);padding:12px 0">Showing first 100. Use the filter to narrow down.</div>`;
+}
+
+async function saveEdit(id) {
+  const name  = document.getElementById('edit-name').value.trim();
+  const limit = parseInt(document.getElementById('edit-limit').value) || 200;
+  const msg   = document.getElementById('edit-msg').value.trim();
+  if (!name || !msg) { toast('Name and message required', 'error'); return; }
+  await apiJ(`/api/campaigns/${id}`, { method:'PATCH', body: { name, daily_limit: limit, message: msg } });
+  toast('Saved ✓');
+  renderCampDetail(id);
+}
+
+async function uploadCSV(id) {
+  const file = document.getElementById('csv-input').files[0];
+  if (!file) return;
+  document.getElementById('upload-zone').innerHTML = '<div class="loader"></div>';
+  const fd = new FormData(); fd.append('file', file);
+  const r = await (await api(`/api/campaigns/${id}/upload`, { method:'POST', headers: { 'x-dash-token': TOKEN }, body: fd })).json();
+  document.getElementById('upload-result').innerHTML = `<div style="background:var(--green-dim);border:1px solid rgba(34,197,94,.25);border-radius:8px;padding:14px;font-size:13px">
+    ✅ <strong>${r.inserted}</strong> added &nbsp;·&nbsp; ${r.dupes} duplicates &nbsp;·&nbsp; ${r.blocked} opt-outs skipped &nbsp;·&nbsp; ${r.invalid} invalid phones<br>
+    <span style="color:var(--green);margin-top:6px;display:block">Total in campaign: <strong>${r.total_in_campaign}</strong></span>
+  </div>`;
+  document.getElementById('upload-zone').innerHTML = `<div style="font-size:14px;font-weight:600;color:var(--green)">✓ Upload complete</div><div style="font-size:12px;color:var(--muted);margin-top:4px">Click to upload another file</div>`;
+  document.getElementById('upload-zone').onclick = () => document.getElementById('csv-input').click();
+  renderCampDetail(id);
+}
+
+async function blastNow(id) {
+  const btn = document.getElementById('blast-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loader"></span> Sending...'; }
+  const r = await apiJ(`/api/campaigns/${id}/blast`, { method:'POST' });
+  toast(r.queued > 0 ? `⚡ Queued ${r.queued} messages!` : r.message || 'Nothing to send');
+  setTimeout(() => renderCampDetail(id), 2000);
+}
+
+async function activateCamp(id, refresh) {
+  await apiJ(`/api/campaigns/${id}/activate`, { method:'POST' });
+  toast('Campaign activated ✓');
+  if (refresh) renderCampDetail(id); else renderCampaigns();
+}
+
+async function pauseCamp(id, refresh) {
+  await apiJ(`/api/campaigns/${id}/pause`, { method:'POST' });
+  toast('Campaign paused');
+  if (refresh) renderCampDetail(id); else renderCampaigns();
+}
+
+async function deleteCamp(id, name) {
+  if (!confirm(`Delete campaign "${name}"? This also removes all contacts.`)) return;
+  await apiJ(`/api/campaigns/${id}`, { method:'DELETE' });
+  toast('Deleted');
+  campDetail = null;
+  renderCampaigns();
+}
+
+// Create modal
+function showCreateModal() {
+  const html = `<div class="modal-overlay" id="create-modal" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <div class="modal-title">New Campaign</div>
+      <div class="form-row"><label class="form-label">Campaign Name</label><input class="form-input" id="new-name" placeholder="e.g. June Tampa Blast"></div>
+      <div class="form-row"><label class="form-label">Daily Sending Limit</label><input class="form-input" id="new-limit" type="number" value="200" min="1" max="2000"><div class="form-hint">Max messages to send per day for this campaign</div></div>
+      <div class="form-row"><label class="form-label">Message Template</label><textarea class="form-input" id="new-msg" rows="5" placeholder="Hey {name}, I came across your property at {address}..."></textarea><div class="form-hint">Use {name} for first name, {address} for property address</div></div>
+      <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="createCamp()">Create Campaign</button></div>
+    </div>
+  </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function closeModal() { document.getElementById('create-modal')?.remove(); }
+
+async function createCamp() {
+  const name  = document.getElementById('new-name').value.trim();
+  const limit = parseInt(document.getElementById('new-limit').value) || 200;
+  const msg   = document.getElementById('new-msg').value.trim();
+  if (!name || !msg) { toast('Name and message required', 'error'); return; }
+  const r = await apiJ('/api/campaigns', { method:'POST', body: { name, daily_limit: limit, message: msg } });
+  if (r.error) { toast(r.error, 'error'); return; }
+  closeModal();
+  toast('Campaign created ✓');
+  campDetail = null;
+  renderCampaigns();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INBOX
+// ─────────────────────────────────────────────────────────────────────────────
+async function renderInbox() {
+  const el = document.getElementById('view-inbox');
+  el.innerHTML = `<div class="inbox-layout">
+    <div class="conv-list">
+      <div class="conv-search"><input placeholder="Search phone or message..." oninput="filterConvs(this.value)" id="inbox-search-input"></div>
+      <div id="conv-list-items"><div style="padding:40px;text-align:center"><div class="loader"></div></div></div>
+    </div>
+    <div class="thread-panel" id="thread-panel">
+      <div class="thread-empty"><div><svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="opacity:.3;margin-bottom:12px"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><div style="color:var(--muted);font-size:14px">Select a conversation</div></div></div>
+    </div>
+  </div>`;
+  await refreshInbox();
+}
+
+async function refreshInbox() {
+  inboxData = await apiJ('/api/inbox');
+  const replies = inboxData.reduce((a, c) => a + (c.hasReplied ? 1 : 0), 0);
+  const badge = document.getElementById('inbox-badge');
+  if (badge) { badge.textContent = replies; badge.style.display = replies > 0 ? '' : 'none'; }
+  renderConvList();
+}
+
+function filterConvs(q) { inboxSearch = q.toLowerCase(); renderConvList(); }
+
+function renderConvList() {
+  const el = document.getElementById('conv-list-items');
+  if (!el) return;
+  const filtered = inboxData.filter(c =>
+    !inboxSearch || c.phone.includes(inboxSearch) || c.preview.toLowerCase().includes(inboxSearch)
+  );
+  if (!filtered.length) { el.innerHTML = '<div class="conv-empty">No conversations found</div>'; return; }
+  el.innerHTML = filtered.map(c => {
+    const typeClass = c.replyType === 'yes' ? 'badge-green' : c.replyType === 'no' ? 'badge-red' : 'badge-gray';
+    return `<div class="conv-item${activeConv===c.phone?' active':''}" onclick="openConv('${c.phone}')">
+      <div class="conv-phone">
+        ${esc(c.phone)}
+        ${c.hasReplied ? `<span class="badge ${typeClass}" style="font-size:10px;padding:2px 6px">${c.replyType||'reply'}</span>` : ''}
+        <span class="conv-time">${fmtTime(c.lastActivity)}</span>
+      </div>
+      <div class="conv-preview">${esc(c.preview)}</div>
+    </div>`;
+  }).join('');
+}
+
+function openConv(phone) {
+  activeConv = phone;
+  renderConvList();
+  const conv = inboxData.find(c => c.phone === phone);
+  if (!conv) return;
+
+  const panel = document.getElementById('thread-panel');
+  if (!panel) return;
+
+  const typeClass = conv.replyType === 'yes' ? 'badge-green' : conv.replyType === 'no' ? 'badge-red' : 'badge-gray';
+
+  panel.innerHTML = `
+    <div class="thread-header">
+      <div class="thread-phone">${esc(phone)}</div>
+      ${conv.hasReplied ? `<span class="badge ${typeClass}">${conv.replyType||'reply'}</span>` : ''}
+      <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="openConvSend('${esc(phone)}')">↗ Reply</button>
+    </div>
+    <div class="thread-messages" id="thread-msgs">
+      ${conv.messages.map(m => {
+        const out = m.dir === 'out';
+        return `<div>
+          ${out ? `<div class="msg-from" style="text-align:right">${KMC_LABELS[m.from]||m.from||''}</div>` : ''}
+          <div class="msg ${out?'msg-out':'msg-in'}">${esc(m.text)}</div>
+          <div class="msg-time" style="text-align:${out?'right':'left'}">${fmtTs(m.ts)}</div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="reply-bar">
+      <select id="reply-from">
+        ${KMC_NUMBERS.map(n => `<option value="${n}">${KMC_LABELS[n]||n}</option>`).join('')}
+      </select>
+      <textarea id="reply-text" placeholder="Type a message..." rows="1" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply('${esc(phone)}')}"></textarea>
+      <button class="btn btn-primary" onclick="sendReply('${esc(phone)}')">Send</button>
+    </div>
+  `;
+
+  // Auto-select the from number that was used to contact this person
+  const lastOut = [...conv.messages].reverse().find(m => m.dir === 'out' && m.from);
+  if (lastOut?.from) {
+    const sel = document.getElementById('reply-from');
+    if (sel) sel.value = lastOut.from;
+  }
+
+  // Scroll to bottom
+  const msgs = document.getElementById('thread-msgs');
+  if (msgs) msgs.scrollTop = msgs.scrollHeight;
+}
+
+function openConvSend(phone) {
+  nav('send');
+  setTimeout(() => {
+    const to = document.getElementById('send-to');
+    if (to) { to.value = phone; }
+  }, 100);
+}
+
+async function sendReply(phone) {
+  const from = document.getElementById('reply-from')?.value;
+  const text = document.getElementById('reply-text')?.value.trim();
+  if (!from || !text) return;
+  const btn = document.querySelector('.reply-bar .btn-primary');
+  if (btn) btn.disabled = true;
+  const r = await apiJ('/api/send', { method:'POST', body: { from, to: phone, text } });
+  if (r.ok) {
+    toast('Sent ✓');
+    document.getElementById('reply-text').value = '';
+    await refreshInbox();
+    openConv(phone);
+  } else { toast(r.error || 'Send failed', 'error'); }
+  if (btn) btn.disabled = false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OPT-OUTS
+// ─────────────────────────────────────────────────────────────────────────────
+async function renderOptOuts() {
+  const el = document.getElementById('view-optouts');
+  el.innerHTML = `<div class="view-header"><div><div class="view-title">Opt-Outs</div><div class="view-sub">Global blocked numbers — automatically skipped in all campaigns</div></div></div>
+  <div class="optout-top">
+    <input id="new-opt-phone" placeholder="+1 (555) 000-0000" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 14px;color:var(--text);font-size:14px;outline:none;min-width:220px">
+    <input id="new-opt-reason" placeholder="Reason (optional)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 14px;color:var(--text);font-size:14px;outline:none;min-width:180px">
+    <button class="btn btn-primary" onclick="addOptOut()">+ Add to Blocklist</button>
+    <input placeholder="Search..." oninput="filterOptOuts(this.value)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 14px;color:var(--text);font-size:14px;outline:none;margin-left:auto;min-width:180px">
+  </div>
+  <div class="table-wrap" id="opt-table"><div style="padding:40px;text-align:center"><div class="loader"></div></div></div>`;
+  loadOptOuts();
+}
+
+let allOptOuts = [];
+async function loadOptOuts() {
+  allOptOuts = await apiJ('/api/opt-outs');
+  renderOptOutTable(allOptOuts);
+}
+
+function filterOptOuts(q) {
+  renderOptOutTable(allOptOuts.filter(o => o.phone.includes(q) || (o.reason||'').toLowerCase().includes(q.toLowerCase())));
+}
+
+function renderOptOutTable(list) {
+  const el = document.getElementById('opt-table');
+  if (!el) return;
+  if (!list.length) { el.innerHTML = '<div class="empty-state"><p>No opt-outs yet.</p></div>'; return; }
+  el.innerHTML = `<table><thead><tr><th>Phone</th><th>Reason</th><th>Date</th><th>Action</th></tr></thead><tbody>${
+    list.map(o => `<tr>
+      <td style="font-weight:600">${esc(o.phone)}</td>
+      <td style="color:var(--muted)">${esc(o.reason||'—')}</td>
+      <td style="color:var(--muted);font-size:13px">${fmtTs(o.created_at)}</td>
+      <td><button class="btn btn-ghost btn-sm" onclick="removeOptOut('${esc(o.phone)}')">Remove</button></td>
+    </tr>`).join('')
+  }</tbody></table>`;
+}
+
+async function addOptOut() {
+  const phone  = document.getElementById('new-opt-phone').value.trim();
+  const reason = document.getElementById('new-opt-reason').value.trim();
+  if (!phone) { toast('Enter a phone number', 'error'); return; }
+  const r = await apiJ('/api/opt-outs', { method:'POST', body: { phone, reason } });
+  if (r.ok) { toast(`Blocked ${r.phone} ✓`); document.getElementById('new-opt-phone').value = ''; document.getElementById('new-opt-reason').value = ''; loadOptOuts(); }
+  else toast(r.error || 'Error', 'error');
+}
+
+async function removeOptOut(phone) {
+  await apiJ(`/api/opt-outs/${encodeURIComponent(phone)}`, { method:'DELETE' });
+  toast('Removed from blocklist');
+  loadOptOuts();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MANUAL SEND
+// ─────────────────────────────────────────────────────────────────────────────
+function renderSend() {
+  const el = document.getElementById('view-send');
+  el.innerHTML = `<div class="view-header"><div><div class="view-title">Manual Send</div><div class="view-sub">Send a one-off SMS from any KMC number</div></div></div>
+  <div class="send-card">
+    <div class="form-row">
+      <label class="form-label">From Number</label>
+      <select class="form-input" id="send-from">
+        ${KMC_NUMBERS.map(n => `<option value="${n}">${n} — ${KMC_LABELS[n]}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-row">
+      <label class="form-label">To Number</label>
+      <input class="form-input" id="send-to" placeholder="+1 (555) 000-0000">
+    </div>
+    <div class="form-row">
+      <label class="form-label">Message</label>
+      <textarea class="form-input" id="send-text" rows="5" placeholder="Type your message..." oninput="document.getElementById('send-chars').textContent=this.value.length+' chars'"></textarea>
+      <div class="char-count" id="send-chars">0 chars</div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <button class="btn btn-primary" onclick="doManualSend()" id="send-btn">Send Message</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('send-text').value='';document.getElementById('send-to').value='';document.getElementById('send-chars').textContent='0 chars'">Clear</button>
+    </div>
+    <div id="send-result" style="margin-top:16px"></div>
+  </div>`;
+}
+
+async function doManualSend() {
+  const from = document.getElementById('send-from').value;
+  const to   = document.getElementById('send-to').value.trim();
+  const text = document.getElementById('send-text').value.trim();
+  if (!to || !text) { toast('Fill in all fields', 'error'); return; }
+  const btn = document.getElementById('send-btn');
+  btn.disabled = true; btn.innerHTML = '<span class="loader"></span> Sending...';
+  const r = await apiJ('/api/send', { method:'POST', body: { from, to, text } });
+  btn.disabled = false; btn.textContent = 'Send Message';
+  if (r.ok) {
+    document.getElementById('send-result').innerHTML = `<div style="background:var(--green-dim);border:1px solid rgba(34,197,94,.25);border-radius:8px;padding:14px;font-size:14px;color:var(--green)">✅ Message sent successfully</div>`;
+    toast('Sent ✓');
+    document.getElementById('send-text').value = '';
+    document.getElementById('send-chars').textContent = '0 chars';
+  } else {
+    document.getElementById('send-result').innerHTML = `<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:14px;font-size:14px;color:var(--red)">❌ ${r.error || 'Send failed (status '+r.status+')'}</div>`;
+    toast(r.error || 'Send failed', 'error');
+  }
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+tryAutoLogin();
+</script>
+</body>
+</html>
