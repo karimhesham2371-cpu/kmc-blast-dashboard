@@ -165,6 +165,18 @@ textarea.form-input{resize:vertical;min-height:100px;font-family:inherit}
 .upload-zone:hover{border-color:var(--green);background:var(--green-dim)}
 .upload-zone input{display:none}
 
+/* ── Inbox filter pills ── */
+.inbox-filters{display:flex;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.filter-pill{padding:4px 11px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);transition:all .15s;white-space:nowrap}
+.filter-pill:hover{background:var(--card2);color:var(--text)}
+.filter-pill.active{background:var(--green-dim);color:var(--green);border-color:rgba(34,197,94,.35)}
+.filter-pill.pill-yes.active{background:rgba(34,197,94,.15);color:var(--green);border-color:rgba(34,197,94,.4)}
+.filter-pill.pill-no.active{background:rgba(239,68,68,.12);color:var(--red);border-color:rgba(239,68,68,.3)}
+.filter-pill.pill-unread.active{background:rgba(88,166,255,.12);color:var(--blue);border-color:rgba(88,166,255,.3)}
+.conv-item.unread .conv-phone{font-weight:700;color:var(--text)}
+.conv-item.unread::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--blue);position:absolute;left:6px;top:50%;transform:translateY(-50%)}
+.conv-item{position:relative;padding-left:20px}
+
 /* ── Context menu ── */
 #ctx-menu{position:fixed;z-index:8000;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:6px;min-width:210px;box-shadow:0 8px 32px rgba(0,0,0,.5);display:none}
 #ctx-menu.open{display:block}
@@ -271,7 +283,9 @@ let currentView = 'overview';
 let inboxData = [];
 let activeConv = null;
 let inboxSearch = '';
+let inboxFilter = 'all'; // all | yes | no | unread
 let inboxRefreshTimer = null;
+let inboxReadTs = {}; // phone → timestamp of last time we opened that conv
 const KMC_NUMBERS = ['+12109856004','+17869499467','+14709320125','+19163474799','+13126752435'];
 const KMC_LABELS  = {
   '+12109856004': 'San Antonio TX',
@@ -625,6 +639,12 @@ async function renderInbox() {
   el.innerHTML = `<div class="inbox-layout">
     <div class="conv-list">
       <div class="conv-search"><input placeholder="Search phone or message..." oninput="filterConvs(this.value)" id="inbox-search-input"></div>
+      <div class="inbox-filters" id="inbox-filters">
+        <button class="filter-pill active"        onclick="setInboxFilter('all')"    id="pill-all">All</button>
+        <button class="filter-pill pill-unread"   onclick="setInboxFilter('unread')" id="pill-unread">🔵 Unread</button>
+        <button class="filter-pill pill-yes"      onclick="setInboxFilter('yes')"    id="pill-yes">✅ Interested</button>
+        <button class="filter-pill pill-no"       onclick="setInboxFilter('no')"     id="pill-no">❌ Objections</button>
+      </div>
       <div id="conv-list-items"><div style="padding:40px;text-align:center"><div class="loader"></div></div></div>
     </div>
     <div class="thread-panel" id="thread-panel">
@@ -634,38 +654,96 @@ async function renderInbox() {
   await refreshInbox();
 }
 
+function setInboxFilter(f) {
+  inboxFilter = f;
+  document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
+  const pill = document.getElementById('pill-' + f);
+  if (pill) pill.classList.add('active');
+  renderConvList();
+}
+
 async function refreshInbox() {
   inboxData = await apiJ('/api/inbox');
-  const replies = inboxData.reduce((a, c) => a + (c.hasReplied ? 1 : 0), 0);
+
+  // Mark a conversation unread if the last message is inbound AND we haven't
+  // opened it since that message arrived (tracked in inboxReadTs via localStorage)
+  const savedTs = JSON.parse(localStorage.getItem('kmc_read_ts') || '{}');
+  inboxReadTs = savedTs;
+  inboxData.forEach(c => {
+    const lastMsg  = c.messages.at(-1);
+    const lastRead = inboxReadTs[c.phone] || 0;
+    c.isUnread = lastMsg && lastMsg.dir === 'in' && new Date(lastMsg.ts) > new Date(lastRead);
+  });
+
+  // Counts for pill labels
+  const unreadCount = inboxData.filter(c => c.isUnread).length;
+  const yesCount    = inboxData.filter(c => c.replyType === 'yes').length;
+  const noCount     = inboxData.filter(c => c.replyType === 'no').length;
+
   const badge = document.getElementById('inbox-badge');
-  if (badge) { badge.textContent = replies; badge.style.display = replies > 0 ? '' : 'none'; }
+  if (badge) { badge.textContent = unreadCount || inboxData.length; badge.style.display = inboxData.length > 0 ? '' : 'none'; }
+
+  const pillUnread = document.getElementById('pill-unread');
+  const pillYes    = document.getElementById('pill-yes');
+  const pillNo     = document.getElementById('pill-no');
+  const pillAll    = document.getElementById('pill-all');
+  if (pillAll)    pillAll.textContent    = `All (${inboxData.length})`;
+  if (pillUnread) pillUnread.textContent = `🔵 Unread (${unreadCount})`;
+  if (pillYes)    pillYes.textContent    = `✅ Interested (${yesCount})`;
+  if (pillNo)     pillNo.textContent     = `❌ Objections (${noCount})`;
+
   renderConvList();
 }
 
 function filterConvs(q) { inboxSearch = q.toLowerCase(); renderConvList(); }
 
+function isUnread(c) {
+  const lastMsg  = c.messages.at(-1);
+  const lastRead = inboxReadTs[c.phone] || 0;
+  return lastMsg && lastMsg.dir === 'in' && new Date(lastMsg.ts) > new Date(lastRead);
+}
+
 function renderConvList() {
   const el = document.getElementById('conv-list-items');
   if (!el) return;
-  const filtered = inboxData.filter(c =>
-    !inboxSearch || c.phone.includes(inboxSearch) || c.preview.toLowerCase().includes(inboxSearch)
+
+  let list = inboxData;
+
+  // Apply active filter
+  if (inboxFilter === 'yes')    list = list.filter(c => c.replyType === 'yes');
+  else if (inboxFilter === 'no') list = list.filter(c => c.replyType === 'no');
+  else if (inboxFilter === 'unread') list = list.filter(c => c.isUnread);
+
+  // Apply search
+  if (inboxSearch) list = list.filter(c =>
+    c.phone.includes(inboxSearch) || c.preview.toLowerCase().includes(inboxSearch)
   );
-  if (!filtered.length) { el.innerHTML = '<div class="conv-empty">No conversations found</div>'; return; }
-  el.innerHTML = filtered.map(c => {
-    const typeClass = c.replyType === 'yes' ? 'badge-green' : c.replyType === 'no' ? 'badge-red' : 'badge-gray';
-    return `<div class="conv-item${activeConv===c.phone?' active':''}" onclick="openConv('${c.phone}')">
+
+  if (!list.length) { el.innerHTML = '<div class="conv-empty">No conversations found</div>'; return; }
+
+  el.innerHTML = list.map(c => {
+    const typeClass  = c.replyType === 'yes' ? 'badge-green' : c.replyType === 'no' ? 'badge-red' : 'badge-gray';
+    const unreadCls  = c.isUnread ? ' unread' : '';
+    return `<div class="conv-item${activeConv===c.phone?' active':''}${unreadCls}" onclick="openConv('${c.phone}')">
       <div class="conv-phone">
         ${esc(c.phone)}
         ${c.hasReplied ? `<span class="badge ${typeClass}" style="font-size:10px;padding:2px 6px">${c.replyType||'reply'}</span>` : ''}
+        ${c.isUnread ? `<span style="font-size:10px;color:var(--blue);font-weight:700;margin-left:2px">NEW</span>` : ''}
         <span class="conv-time">${fmtTime(c.lastActivity)}</span>
       </div>
-      <div class="conv-preview">${esc(c.preview)}</div>
+      <div class="conv-preview" style="${c.isUnread?'color:var(--text);font-weight:500':''}">${esc(c.preview)}</div>
     </div>`;
   }).join('');
 }
 
 function openConv(phone) {
   activeConv = phone;
+  // Mark as read — save timestamp to localStorage
+  inboxReadTs[phone] = new Date().toISOString();
+  localStorage.setItem('kmc_read_ts', JSON.stringify(inboxReadTs));
+  // Update isUnread flag and re-render list
+  const conv = inboxData.find(c => c.phone === phone);
+  if (conv) conv.isUnread = false;
   renderConvList();
   const conv = inboxData.find(c => c.phone === phone);
   if (!conv) return;
