@@ -856,7 +856,7 @@ function renderConvList() {
     const unreadCls  = c.isUnread ? ' unread' : '';
     return `<div class="conv-item${activeConv===c.phone?' active':''}${unreadCls}" onclick="openConv('${c.phone}')">
       <div class="conv-phone">
-        ${esc(c.phone)}
+        ${c.name ? `<strong>${esc(c.name)}</strong> <span style="color:var(--muted);font-weight:400">${esc(c.phone)}</span>` : esc(c.phone)}
         ${c.hasReplied ? `<span class="badge ${typeClass}" style="font-size:10px;padding:2px 6px">${c.replyType||'reply'}</span>` : ''}
         ${c.isUnread ? `<span style="font-size:10px;color:var(--blue);font-weight:700;margin-left:2px">NEW</span>` : ''}
         <span class="conv-time">${fmtTime(c.lastActivity)}</span>
@@ -882,9 +882,11 @@ function openConv(phone) {
 
   const typeClass = conv.replyType === 'yes' ? 'badge-green' : conv.replyType === 'no' ? 'badge-red' : 'badge-gray';
 
+  const displayName = conv.name ? esc(conv.name) : '';
+
   panel.innerHTML = `
     <div class="thread-header">
-      <div class="thread-phone">${esc(phone)}</div>
+      <div class="thread-phone">${displayName ? `<strong>${displayName}</strong> <span style="color:var(--muted);font-weight:400;font-size:13px">${esc(phone)}</span>` : esc(phone)}</div>
       ${conv.hasReplied ? `<span class="badge ${typeClass}">${conv.replyType||'reply'}</span>` : ''}
       <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="openConvSend('${esc(phone)}')">↗ Reply</button>
     </div>
@@ -903,6 +905,9 @@ function openConv(phone) {
           <div class="msg-time" style="text-align:${out?'right':'left'}">${fmtTs(m.ts)}</div>
         </div>`;
       }).join('')}
+    </div>
+    <div class="quick-replies" id="quick-replies" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 14px 8px">
+      <button class="btn btn-ghost btn-sm" onclick="useQuickReply('${esc(phone)}')">⚡ Use Auto-Reply Message${displayName?` for ${displayName}`:''}</button>
     </div>
     <div class="reply-bar">
       <select id="reply-from">
@@ -935,6 +940,23 @@ function openConvSend(phone) {
     const to = document.getElementById('send-to');
     if (to) { to.value = phone; }
   }, 100);
+}
+
+// Generic fallback used if the contact's campaign doesn't have an auto-reply message configured
+const DEFAULT_QUICK_REPLY = "Awesome, {name}! Just fill out this quick form and we'll get you a cash offer fast, no obligation, no fees: https://kmcashoffers.com/get-offer Takes 2 minutes, talk soon!";
+
+function useQuickReply(phone) {
+  const conv = inboxData.find(c => c.phone === phone);
+  const template = conv?.autoReplyMessage || DEFAULT_QUICK_REPLY;
+  const name = (conv?.name || '').trim();
+  const text = template.replace(/\{name\}/gi, name || 'there');
+  const box = document.getElementById('reply-text');
+  if (box) {
+    box.value = text;
+    box.style.height = 'auto';
+    box.style.height = Math.min(box.scrollHeight, 100) + 'px';
+    box.focus();
+  }
 }
 
 async function sendReply(phone) {

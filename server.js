@@ -374,10 +374,20 @@ app.post('/api/campaigns/:id/blast', auth, async (req, res) => {
 
 // Inbox
 app.get('/api/inbox', auth, async (req, res) => {
-  const [inbound, outbound] = await Promise.all([
+  const [inbound, outbound, contacts, campaigns] = await Promise.all([
     sb.get('kmc_replies',  'order=timestamp.desc&limit=2000'),
     sb.get('kmc_outbound', 'order=sent_at.desc&limit=2000'),
+    sb.get('kmc_contacts', 'select=phone,first_name,campaign_id&order=created_at.desc'),
+    sb.get('kmc_campaigns','select=id,auto_reply_enabled,auto_reply_message'),
   ]);
+
+  // Build phone → { name, campaign } lookup (most recently-created contact record wins if a phone appears more than once)
+  const campById = {}; for (const c of campaigns) campById[c.id] = c;
+  const contactByPhone = {};
+  for (const c of contacts) {
+    if (!c.phone || contactByPhone[c.phone]) continue;
+    contactByPhone[c.phone] = { name: (c.first_name || '').trim(), campaign: campById[c.campaign_id] || null };
+  }
 
   const m = {};
   for (const r of outbound) {
@@ -397,6 +407,10 @@ app.get('/api/inbox', auth, async (req, res) => {
   const convs = Object.values(m).map(c => {
     c.messages.sort((a, b) => new Date(a.ts) - new Date(b.ts));
     c.preview = c.messages.at(-1)?.text?.slice(0, 60) || '';
+    const contact = contactByPhone[c.phone];
+    c.name = contact?.name || '';
+    const camp = contact?.campaign;
+    c.autoReplyMessage = (camp?.auto_reply_enabled && camp.auto_reply_message) ? camp.auto_reply_message : null;
     return c;
   }).sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
 
