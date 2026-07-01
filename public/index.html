@@ -745,7 +745,6 @@ function openConv(phone) {
   const conv = inboxData.find(c => c.phone === phone);
   if (conv) conv.isUnread = false;
   renderConvList();
-  const conv = inboxData.find(c => c.phone === phone);
   if (!conv) return;
 
   const panel = document.getElementById('thread-panel');
