@@ -461,15 +461,16 @@ async function renderCampDetail(id) {
     </div>
     <div class="camp-stats-row">
       <div class="camp-stat"><div class="camp-stat-val">${stats.total.toLocaleString()}</div><div class="camp-stat-lbl">Total</div></div>
-      <div class="camp-stat"><div class="camp-stat-val" style="color:var(--muted)">${stats.pending.toLocaleString()}</div><div class="camp-stat-lbl">Pending</div></div>
+      <div class="camp-stat" style="background:var(--green-dim);border:1px solid rgba(34,197,94,.3);border-radius:8px"><div class="camp-stat-val" style="color:var(--green)">${stats.pending.toLocaleString()}</div><div class="camp-stat-lbl">📋 Remaining to Send</div></div>
       <div class="camp-stat"><div class="camp-stat-val" style="color:var(--green)">${stats.sent.toLocaleString()}</div><div class="camp-stat-lbl">Sent</div></div>
       <div class="camp-stat"><div class="camp-stat-val" style="color:var(--red)">${stats.failed.toLocaleString()}</div><div class="camp-stat-lbl">Failed</div></div>
       <div class="camp-stat"><div class="camp-stat-val" style="color:var(--red)">${stats.opted_out.toLocaleString()}</div><div class="camp-stat-lbl">Opt-Out</div></div>
     </div>
     <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;display:flex;align-items:center;gap:14px">
       <div class="progress-wrap" style="flex:1;height:10px"><div class="progress-bar" style="width:${p}%"></div></div>
-      <span style="font-size:13px;color:var(--muted)">${p}% sent</span>
+      <span style="font-size:13px;color:var(--muted)">${p}% sent &nbsp;·&nbsp; <strong style="color:var(--text)">${stats.pending.toLocaleString()} contacts remaining</strong></span>
     </div>
+    ${c.quiet_hours_enabled ? `<div style="font-size:12px;color:var(--muted)">🕘 Quiet hours enabled — this campaign only sends between 9am–9pm server time</div>` : ''}
     <div class="camp-actions">
       ${c.status==='active'    ? `<button class="btn btn-yellow" onclick="pauseCamp(${c.id},true)">⏸ Pause</button>` : ''}
       ${c.status!=='active'&&c.status!=='completed' ? `<button class="btn btn-primary" onclick="activateCamp(${c.id},true)">▶ Activate</button>` : ''}
@@ -491,11 +492,39 @@ async function renderCampDetail(id) {
           <input class="form-input" id="edit-limit" type="number" value="${c.daily_limit||200}">
         </div>
         <div class="form-row">
-          <label class="form-label">Message Template</label>
-          <textarea class="form-input" id="edit-msg" rows="5">${esc(c.message||'')}</textarea>
-          <div class="form-hint">Use {name} and {address} as placeholders</div>
+          <label class="form-label">First Message — Variant 1 <span style="color:var(--red)">*</span></label>
+          <textarea class="form-input" id="edit-msg" rows="3">${esc(c.message||'')}</textarea>
+        </div>
+        <div class="form-row">
+          <label class="form-label">First Message — Variant 2 <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+          <textarea class="form-input" id="edit-msg2" rows="3">${esc(c.message_2||'')}</textarea>
+        </div>
+        <div class="form-row">
+          <label class="form-label">First Message — Variant 3 <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+          <textarea class="form-input" id="edit-msg3" rows="3">${esc(c.message_3||'')}</textarea>
+          <div class="form-hint">Use {name} and {address} as placeholders. Filled variants rotate round-robin across contacts.</div>
+        </div>
+        <div class="form-row" style="border-top:1px solid var(--border);padding-top:14px">
+          <label class="form-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="edit-autoreply-en" ${c.auto_reply_enabled?'checked':''} style="width:auto"> Auto-reply when a contact says YES</label>
+          <textarea class="form-input" id="edit-autoreply-msg" rows="3" style="margin-top:8px">${esc(c.auto_reply_message||'')}</textarea>
+        </div>
+        <div class="form-row">
+          <label class="form-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="edit-quiet-en" ${c.quiet_hours_enabled?'checked':''} style="width:auto"> Respect quiet hours (9am–9pm)</label>
         </div>
         <button class="btn btn-primary" onclick="saveEdit(${c.id})">Save Changes</button>
+      </div>
+
+      <!-- Test Send -->
+      <div class="detail-section" style="margin-top:20px">
+        <div class="detail-section-title">🧪 Test Send</div>
+        <div class="form-hint" style="margin-bottom:10px">Preview any variant on your own phone before blasting the full list. Sends are prefixed with [TEST] and are not logged against any contact.</div>
+        <div class="form-row"><label class="form-label">Your Phone Number</label><input class="form-input" id="test-phone" placeholder="e.g. 2105551234"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" onclick="testSend(${c.id},1)">Send Variant 1</button>
+          ${c.message_2 ? `<button class="btn btn-ghost btn-sm" onclick="testSend(${c.id},2)">Send Variant 2</button>` : ''}
+          ${c.message_3 ? `<button class="btn btn-ghost btn-sm" onclick="testSend(${c.id},3)">Send Variant 3</button>` : ''}
+          ${c.auto_reply_enabled ? `<button class="btn btn-ghost btn-sm" onclick="testSend(${c.id},'auto_reply')">Send Auto-Reply</button>` : ''}
+        </div>
       </div>
 
       <!-- Upload -->
@@ -550,13 +579,29 @@ async function loadContacts(id) {
 }
 
 async function saveEdit(id) {
-  const name  = document.getElementById('edit-name').value.trim();
-  const limit = parseInt(document.getElementById('edit-limit').value) || 200;
-  const msg   = document.getElementById('edit-msg').value.trim();
+  const name    = document.getElementById('edit-name').value.trim();
+  const limit   = parseInt(document.getElementById('edit-limit').value) || 200;
+  const msg     = document.getElementById('edit-msg').value.trim();
+  const msg2    = document.getElementById('edit-msg2').value.trim();
+  const msg3    = document.getElementById('edit-msg3').value.trim();
+  const arEn    = document.getElementById('edit-autoreply-en').checked;
+  const arMsg   = document.getElementById('edit-autoreply-msg').value.trim();
+  const quietEn = document.getElementById('edit-quiet-en').checked;
   if (!name || !msg) { toast('Name and message required', 'error'); return; }
-  await apiJ(`/api/campaigns/${id}`, { method:'PATCH', body: { name, daily_limit: limit, message: msg } });
+  await apiJ(`/api/campaigns/${id}`, { method:'PATCH', body: {
+    name, daily_limit: limit, message: msg, message_2: msg2 || null, message_3: msg3 || null,
+    auto_reply_enabled: arEn, auto_reply_message: arMsg || null, quiet_hours_enabled: quietEn,
+  }});
   toast('Saved ✓');
   renderCampDetail(id);
+}
+
+async function testSend(id, variant) {
+  const to = document.getElementById('test-phone').value.trim();
+  if (!to) { toast('Enter your phone number first', 'error'); return; }
+  const r = await apiJ(`/api/campaigns/${id}/test-send`, { method:'POST', body: { to, variant } });
+  if (r.error) { toast(r.error, 'error'); return; }
+  toast(r.ok ? 'Test message sent ✓' : 'Send failed');
 }
 
 async function uploadCSV(id) {
@@ -605,11 +650,27 @@ async function deleteCamp(id, name) {
 // Create modal
 function showCreateModal() {
   const html = `<div class="modal-overlay" id="create-modal" onclick="if(event.target===this)closeModal()">
-    <div class="modal">
+    <div class="modal" style="max-width:560px">
       <div class="modal-title">New Campaign</div>
       <div class="form-row"><label class="form-label">Campaign Name</label><input class="form-input" id="new-name" placeholder="e.g. June Tampa Blast"></div>
       <div class="form-row"><label class="form-label">Daily Sending Limit</label><input class="form-input" id="new-limit" type="number" value="200" min="1" max="2000"><div class="form-hint">Max messages to send per day for this campaign</div></div>
-      <div class="form-row"><label class="form-label">Message Template</label><textarea class="form-input" id="new-msg" rows="5" placeholder="Hey {name}, I came across your property at {address}..."></textarea><div class="form-hint">Use {name} for first name, {address} for property address</div></div>
+
+      <div class="form-row"><label class="form-label">First Message — Variant 1 <span style="color:var(--red)">*</span></label><textarea class="form-input" id="new-msg" rows="3" placeholder="Hey {name}, I came across your property at {address}..."></textarea></div>
+      <div class="form-row"><label class="form-label">First Message — Variant 2 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="new-msg2" rows="3" placeholder="Leave blank to skip this variant"></textarea></div>
+      <div class="form-row"><label class="form-label">First Message — Variant 3 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="new-msg3" rows="3" placeholder="Leave blank to skip this variant"></textarea></div>
+      <div class="form-hint" style="margin-top:-8px;margin-bottom:14px">Use {name} / {address} as placeholders. Contacts are rotated round-robin across whichever variants you fill in — this avoids spam-filter pattern detection from sending the exact same text to everyone.</div>
+
+      <div class="form-row" style="border-top:1px solid var(--border);padding-top:14px">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="new-autoreply-en" style="width:auto"> Auto-reply when a contact says YES / shows interest</label>
+        <textarea class="form-input" id="new-autoreply-msg" rows="3" placeholder="Awesome {name}! Someone from our team will call you shortly to go over the details on {address}." style="margin-top:8px"></textarea>
+        <div class="form-hint">Sent automatically, once per contact, from the same number that originally texted them.</div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="new-quiet-en" checked style="width:auto"> Respect quiet hours (only send 9am–9pm)</label>
+        <div class="form-hint">Recommended for TCPA compliance — pauses sending outside this window and resumes automatically.</div>
+      </div>
+
       <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="createCamp()">Create Campaign</button></div>
     </div>
   </div>`;
@@ -619,11 +680,19 @@ function showCreateModal() {
 function closeModal() { document.getElementById('create-modal')?.remove(); }
 
 async function createCamp() {
-  const name  = document.getElementById('new-name').value.trim();
-  const limit = parseInt(document.getElementById('new-limit').value) || 200;
-  const msg   = document.getElementById('new-msg').value.trim();
-  if (!name || !msg) { toast('Name and message required', 'error'); return; }
-  const r = await apiJ('/api/campaigns', { method:'POST', body: { name, daily_limit: limit, message: msg } });
+  const name    = document.getElementById('new-name').value.trim();
+  const limit   = parseInt(document.getElementById('new-limit').value) || 200;
+  const msg     = document.getElementById('new-msg').value.trim();
+  const msg2    = document.getElementById('new-msg2').value.trim();
+  const msg3    = document.getElementById('new-msg3').value.trim();
+  const arEn    = document.getElementById('new-autoreply-en').checked;
+  const arMsg   = document.getElementById('new-autoreply-msg').value.trim();
+  const quietEn = document.getElementById('new-quiet-en').checked;
+  if (!name || !msg) { toast('Name and at least one message variant required', 'error'); return; }
+  const r = await apiJ('/api/campaigns', { method:'POST', body: {
+    name, daily_limit: limit, message: msg, message_2: msg2 || null, message_3: msg3 || null,
+    auto_reply_enabled: arEn, auto_reply_message: arMsg || null, quiet_hours_enabled: quietEn,
+  }});
   if (r.error) { toast(r.error, 'error'); return; }
   closeModal();
   toast('Campaign created ✓');

@@ -132,10 +132,13 @@ app.get('/api/campaigns', auth, async (req, res) => {
 });
 
 app.post('/api/campaigns', auth, async (req, res) => {
-  const { name, daily_limit, message } = req.body;
+  const { name, daily_limit, message, message_2, message_3, auto_reply_enabled, auto_reply_message, quiet_hours_enabled } = req.body;
   if (!name || !message) return res.status(400).json({ error: 'name and message required' });
   const r = await sb.post('kmc_campaigns', {
     name, daily_limit: daily_limit || 200, message,
+    message_2: message_2 || null, message_3: message_3 || null,
+    auto_reply_enabled: !!auto_reply_enabled, auto_reply_message: auto_reply_message || null,
+    quiet_hours_enabled: !!quiet_hours_enabled,
     status: 'draft', sent_today: 0, total_contacts: 0, last_sent_date: null,
     created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
   });
@@ -240,6 +243,12 @@ app.post('/api/campaigns/:id/pause', auth, async (req, res) => {
 });
 
 // Blast engine
+function inQuietHours() {
+  // Compliance-friendly send window: 9:00 AM – 8:59 PM server time
+  const hr = new Date().getHours();
+  return hr < 9 || hr >= 21;
+}
+
 async function runBlast(campaign) {
   const id      = campaign.id;
   const today   = new Date().toISOString().slice(0, 10);
@@ -247,11 +256,18 @@ async function runBlast(campaign) {
   const cap       = (campaign.daily_limit || 200) - sentSoFar;
   if (cap <= 0) return { sent: 0, reason: 'daily limit reached' };
 
+  if (campaign.quiet_hours_enabled && inQuietHours()) {
+    return { sent: 0, reason: 'quiet hours (9am-9pm window)' };
+  }
+
   const pending = await sb.get('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&limit=${cap}&order=created_at.asc`);
   if (!pending.length) {
     await sb.patch('kmc_campaigns', `id=eq.${id}`, { status: 'completed', updated_at: new Date().toISOString() });
     return { sent: 0, reason: 'completed' };
   }
+
+  // Build the pool of available message variants (1-3), rotated round-robin per contact
+  const variants = [campaign.message, campaign.message_2, campaign.message_3].filter(v => v && v.trim());
 
   const optOuts = new Set((await sb.get('kmc_opt_outs', 'select=phone')).map(r => r.phone));
   let sent = 0, failed = 0, ni = 0;
@@ -261,8 +277,11 @@ async function runBlast(campaign) {
       await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { status: 'opted_out' });
       continue;
     }
-    const from = KMC_NUMBERS[ni % KMC_NUMBERS.length]; ni++;
-    const text = (campaign.message || '')
+    const from = KMC_NUMBERS[ni % KMC_NUMBERS.length];
+    const variantIdx = ni % variants.length;
+    const template = variants[variantIdx];
+    ni++;
+    const text = (template || '')
       .replace(/\{name\}/gi,    contact.first_name || '')
       .replace(/\{address\}/gi, contact.address    || '');
 
@@ -271,11 +290,12 @@ async function runBlast(campaign) {
 
     await Promise.all([
       sb.post('kmc_outbound', { campaign_id: id, from, to: contact.phone, text, status: st, telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-      sb.patch('kmc_contacts', `id=eq.${contact.id}`, { status: st, sent_at: new Date().toISOString(), assigned_from: from }),
+      sb.patch('kmc_contacts', `id=eq.${contact.id}`, { status: st, sent_at: new Date().toISOString(), assigned_from: from, message_variant: variantIdx + 1 }),
     ]);
 
     if (r.ok) sent++; else failed++;
-    await sleep(2100);
+    // Human-like jitter: 1.8s-2.8s between sends instead of a fixed robotic cadence
+    await sleep(1800 + Math.floor(Math.random() * 1000));
   }
 
   await sb.patch('kmc_campaigns', `id=eq.${id}`, {
@@ -329,6 +349,26 @@ app.get('/api/inbox', auth, async (req, res) => {
   }).sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
 
   res.json(convs);
+});
+
+// Test send — preview any of the 3 variants (or auto-reply) to a single number, no contact/campaign side-effects
+app.post('/api/campaigns/:id/test-send', auth, async (req, res) => {
+  const { to, variant } = req.body; // variant: 1, 2, 3, or 'auto_reply'
+  if (!to) return res.status(400).json({ error: 'to required' });
+  const campaigns = await sb.get('kmc_campaigns', `id=eq.${req.params.id}`);
+  const c = campaigns[0];
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  const raw = to.replace(/\D/g, '');
+  const phone = '+1' + raw.slice(-10);
+  let template;
+  if (variant === 'auto_reply') template = c.auto_reply_message;
+  else if (variant == 2) template = c.message_2;
+  else if (variant == 3) template = c.message_3;
+  else template = c.message;
+  if (!template?.trim()) return res.status(400).json({ error: 'That variant is empty' });
+  const text = template.replace(/\{name\}/gi, 'Test').replace(/\{address\}/gi, '123 Sample St');
+  const r = await sendSMS(KMC_NUMBERS[0], phone, `[TEST] ${text}`);
+  res.json({ ok: r.ok, id: r.id, status: r.status, text });
 });
 
 // Manual send
@@ -401,6 +441,29 @@ app.post('/webhook/sms', async (req, res) => {
 
     await sb.post('kmc_replies', { from, to, text, type, timestamp: new Date().toISOString(), synced: false });
     console.log(`[Inbound] ${type.toUpperCase()} | ${from} → ${to} | "${text.slice(0, 60)}"`);
+
+    // Auto-reply on interest: find which campaign this contact belongs to and,
+    // if that campaign has an auto-reply configured, send it once.
+    if (type === 'yes') {
+      const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(from)}&order=created_at.desc&limit=1`);
+      const contact = contacts[0];
+      if (contact && !contact.auto_replied && contact.campaign_id) {
+        const camps = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
+        const camp = camps[0];
+        if (camp?.auto_reply_enabled && camp.auto_reply_message?.trim()) {
+          const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+          const replyText = camp.auto_reply_message
+            .replace(/\{name\}/gi,    contact.first_name || '')
+            .replace(/\{address\}/gi, contact.address    || '');
+          const r = await sendSMS(replyFrom, from, replyText);
+          await Promise.all([
+            sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: replyText, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+            sb.patch('kmc_contacts', `id=eq.${contact.id}`, { auto_replied: true }),
+          ]);
+          console.log(`[AutoReply] ${camp.name} → ${from} | "${replyText.slice(0, 60)}"`);
+        }
+      }
+    }
   } catch(e) { console.error('[webhook]', e.message); }
 });
 
