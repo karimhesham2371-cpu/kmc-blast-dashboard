@@ -326,10 +326,14 @@ async function tryAutoLogin() {
 
 // ── API ───────────────────────────────────────────────────────────────────────
 async function api(path, opts = {}) {
+  const isFormData = opts.body instanceof FormData;
+  const headers = isFormData
+    ? { 'x-dash-token': TOKEN, ...(opts.headers || {}) }
+    : { 'x-dash-token': TOKEN, 'Content-Type': 'application/json', ...(opts.headers || {}) };
   const res = await fetch(path, {
     ...opts,
-    headers: { 'x-dash-token': TOKEN, 'Content-Type': 'application/json', ...(opts.headers || {}) },
-    body: opts.body && typeof opts.body === 'object' ? JSON.stringify(opts.body) : opts.body,
+    headers,
+    body: !isFormData && opts.body && typeof opts.body === 'object' ? JSON.stringify(opts.body) : opts.body,
   });
   if (res.status === 401) { localStorage.removeItem('kmc_token'); location.reload(); }
   return res;
