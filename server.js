@@ -223,9 +223,22 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
 
   if (phoneIdx < 0 || phoneIdx === undefined) return res.status(400).json({ error: 'No phone column found in CSV — please map it manually' });
 
-  const optOuts  = new Set((await sb.get('kmc_opt_outs', 'select=phone')).map(r => r.phone));
-  const existing = new Set((await sb.get('kmc_contacts', `campaign_id=eq.${id}&select=phone`)).map(r => r.phone));
-  const batch = []; let invalid = 0, dupes = 0, blocked = 0;
+  const [optOutRows, thisCampRows, otherCampRows, outboundRows] = await Promise.all([
+    sb.get('kmc_opt_outs',  'select=phone'),
+    sb.get('kmc_contacts',  `campaign_id=eq.${id}&select=phone`),
+    sb.get('kmc_contacts',  `campaign_id=neq.${id}&select=phone,status`),
+    sb.get('kmc_outbound',  'select=to'),
+  ]);
+  const optOuts  = new Set(optOutRows.map(r => r.phone));
+  const existing = new Set(thisCampRows.map(r => r.phone));
+  // Cross-campaign safety net: anyone already in another campaign (queued or already sent),
+  // or with any outbound send history at all, gets skipped so we never double-text a lead
+  // just because they were uploaded into more than one list.
+  const alreadyContacted = new Set([
+    ...otherCampRows.map(r => r.phone),
+    ...outboundRows.map(r => r.to),
+  ]);
+  const batch = []; let invalid = 0, dupes = 0, blocked = 0, crossCampaign = 0;
 
   for (let i = 1; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
@@ -233,9 +246,11 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
     const raw = (p[phoneIdx] || '').replace(/\D/g, '');
     if (raw.length < 10) { invalid++; continue; }
     const phone = '+1' + raw.slice(-10);
-    if (optOuts.has(phone))  { blocked++; continue; }
-    if (existing.has(phone)) { dupes++; continue; }
+    if (optOuts.has(phone))         { blocked++; continue; }
+    if (existing.has(phone))        { dupes++; continue; }
+    if (alreadyContacted.has(phone)){ crossCampaign++; continue; }
     existing.add(phone);
+    alreadyContacted.add(phone);
 
     const addr  = addrIdx >= 0 ? (p[addrIdx] || '').trim() : '';
     const city  = cityIdx >= 0 ? (p[cityIdx] || '').trim() : '';
@@ -259,7 +274,7 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
 
   const total = (await sb.get('kmc_contacts', `campaign_id=eq.${id}&select=id`)).length;
   await sb.patch('kmc_campaigns', `id=eq.${id}`, { total_contacts: total, updated_at: new Date().toISOString() });
-  res.json({ inserted, dupes, blocked, invalid, total_in_campaign: total });
+  res.json({ inserted, dupes, blocked, invalid, crossCampaign, total_in_campaign: total });
 });
 
 app.get('/api/campaigns/:id/contacts', auth, async (req, res) => {
