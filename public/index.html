@@ -605,18 +605,78 @@ async function testSend(id, variant) {
   toast(r.ok ? 'Test message sent ✓' : 'Send failed');
 }
 
+let pendingUploadFile = null;
+
 async function uploadCSV(id) {
   const file = document.getElementById('csv-input').files[0];
   if (!file) return;
+  pendingUploadFile = file;
   document.getElementById('upload-zone').innerHTML = '<div class="loader"></div>';
   const fd = new FormData(); fd.append('file', file);
-  const r = await (await api(`/api/campaigns/${id}/upload`, { method:'POST', headers: { 'x-dash-token': TOKEN }, body: fd })).json();
-  document.getElementById('upload-result').innerHTML = `<div style="background:var(--green-dim);border:1px solid rgba(34,197,94,.25);border-radius:8px;padding:14px;font-size:13px">
-    ✅ <strong>${r.inserted}</strong> added &nbsp;·&nbsp; ${r.dupes} duplicates &nbsp;·&nbsp; ${r.blocked} opt-outs skipped &nbsp;·&nbsp; ${r.invalid} invalid phones<br>
-    <span style="color:var(--green);margin-top:6px;display:block">Total in campaign: <strong>${r.total_in_campaign}</strong></span>
+  const r = await (await api(`/api/campaigns/${id}/upload-preview`, { method:'POST', headers: { 'x-dash-token': TOKEN }, body: fd })).json();
+  if (r.error) { toast(r.error, 'error'); renderCampDetail(id); return; }
+  showMappingPreview(id, r);
+}
+
+function colOption(headers, selectedIdx, label) {
+  return `<option value="-1" ${selectedIdx<0?'selected':''}>— None —</option>` +
+    headers.map((h,i) => `<option value="${i}" ${i===selectedIdx?'selected':''}>${esc(h||'(column '+(i+1)+')')}</option>`).join('');
+}
+
+function showMappingPreview(id, r) {
+  const { headers, map, sampleRows, totalRows } = r;
+  const fieldRow = (fieldId, label, required, selectedIdx) => `
+    <div class="form-row">
+      <label class="form-label">${label}${required?' <span style="color:var(--red)">*</span>':''}</label>
+      <select class="form-input" id="${fieldId}">${colOption(headers, selectedIdx, label)}</select>
+    </div>`;
+
+  const preview = sampleRows.slice(0,3).map(row => `<tr>${headers.map((h,i)=>`<td style="font-size:12px;padding:4px 8px;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis">${esc(row[i]||'')}</td>`).join('')}</tr>`).join('');
+
+  const html = `<div class="modal-overlay" id="map-modal" onclick="if(event.target===this)closeMappingPreview()">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-title">Confirm Column Mapping</div>
+      <div class="form-hint" style="margin-bottom:14px">${totalRows} row(s) detected. We auto-matched these columns — double check (especially Phone, First Name, Address) and fix any that look wrong before importing.</div>
+      ${fieldRow('map-phone','Phone Number',true,map.phoneIdx)}
+      ${fieldRow('map-name','First Name',false,map.nameIdx)}
+      ${fieldRow('map-addr','Address',false,map.addrIdx)}
+      ${fieldRow('map-city','City',false,map.cityIdx)}
+      ${fieldRow('map-state','State',false,map.stIdx)}
+      ${fieldRow('map-zip','Zip',false,map.zipIdx)}
+      <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;margin-top:10px">
+        <table style="width:100%;border-collapse:collapse"><thead><tr>${headers.map(h=>`<th style="font-size:11px;color:var(--muted);padding:6px 8px;text-align:left;white-space:nowrap">${esc(h)}</th>`).join('')}</tr></thead><tbody>${preview}</tbody></table>
+      </div>
+      <div class="modal-actions"><button class="btn btn-ghost" onclick="closeMappingPreview()">Cancel</button><button class="btn btn-primary" onclick="confirmUpload(${id})">✓ Looks Good — Import</button></div>
+    </div>
   </div>`;
-  document.getElementById('upload-zone').innerHTML = `<div style="font-size:14px;font-weight:600;color:var(--green)">✓ Upload complete</div><div style="font-size:12px;color:var(--muted);margin-top:4px">Click to upload another file</div>`;
-  document.getElementById('upload-zone').onclick = () => document.getElementById('csv-input').click();
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function closeMappingPreview() {
+  document.getElementById('map-modal')?.remove();
+  pendingUploadFile = null;
+  if (campDetail) renderCampDetail(campDetail); // regenerates the upload zone (its file input was destroyed by the loader swap)
+}
+
+async function confirmUpload(id) {
+  if (!pendingUploadFile) return;
+  const phoneCol = document.getElementById('map-phone').value;
+  if (phoneCol === '-1') { toast('Phone column is required', 'error'); return; }
+  const fd = new FormData();
+  fd.append('file', pendingUploadFile);
+  fd.append('phoneCol', phoneCol);
+  fd.append('nameCol',  document.getElementById('map-name').value);
+  fd.append('addrCol',  document.getElementById('map-addr').value);
+  fd.append('cityCol',  document.getElementById('map-city').value);
+  fd.append('stateCol', document.getElementById('map-state').value);
+  fd.append('zipCol',   document.getElementById('map-zip').value);
+  document.getElementById('map-modal')?.remove();
+  document.getElementById('upload-zone').innerHTML = '<div class="loader"></div>';
+
+  const r = await (await api(`/api/campaigns/${id}/upload`, { method:'POST', headers: { 'x-dash-token': TOKEN }, body: fd })).json();
+  pendingUploadFile = null;
+  if (r.error) { toast(r.error, 'error'); renderCampDetail(id); return; }
+  toast(`✅ ${r.inserted} contacts added · ${r.dupes} dupes · ${r.blocked} opt-outs skipped · ${r.invalid} invalid — total in campaign: ${r.total_in_campaign}`);
   renderCampDetail(id);
 }
 

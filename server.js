@@ -170,21 +170,58 @@ app.get('/api/campaigns/:id/stats', auth, async (req, res) => {
   res.json({ total: all.length, pending: pending.length, sent: sent.length, failed: failed.length, opted_out: opted.length });
 });
 
+// ── Column auto-detection (shared by preview + upload) ─────────────────────────
+function detectColumns(rawHeaders) {
+  const headers = rawHeaders.map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const find = (...patterns) => headers.findIndex(h => patterns.some(p => (p instanceof RegExp ? p.test(h) : h === p || h.includes(p))));
+
+  // Phone: prefer an exact/priority match over any column that merely contains "phone"
+  // (e.g. prefer "mobilephone"/"cellphone"/"phone1" over "homephone" if both exist)
+  let phoneIdx = find('mobilephone', 'cellphone', 'cellnumber', 'primaryphone', 'phone1', 'phonenumber', 'mobile', 'cell');
+  if (phoneIdx < 0) phoneIdx = find(/phone/, /^tel/, 'telephone', 'contactnumber');
+
+  let nameIdx = find('firstname', 'fname', 'ownername1', 'ownerfirstname', 'contactfirstname');
+  if (nameIdx < 0) nameIdx = find('name', 'fullname', 'owner', 'ownername', 'contact', 'contactname');
+
+  let addrIdx = find('propertyaddress', 'mailingaddress', 'siteaddress', 'streetaddress', 'address1');
+  if (addrIdx < 0) addrIdx = find(/address/, 'street', 'addr');
+
+  const cityIdx  = find('city', 'propertycity', 'mailingcity');
+  const stIdx    = find('state', 'st', 'propertystate', 'mailingstate');
+  const zipIdx   = find(/zip/, 'postalcode', 'postal');
+
+  return { phoneIdx, nameIdx, addrIdx, cityIdx, stIdx, zipIdx };
+}
+
+// Preview a CSV's column mapping + a few sample rows before committing the import
+app.post('/api/campaigns/:id/upload-preview', auth, upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const lines      = req.file.buffer.toString('utf-8').replace(/\r/g, '').split('\n').filter(l => l.trim());
+  const rawHeaders = parseCSVLine(lines[0]);
+  const map = detectColumns(rawHeaders);
+  const sampleRows = lines.slice(1, 4).map(l => parseCSVLine(l));
+  res.json({ headers: rawHeaders, map, sampleRows, totalRows: lines.length - 1 });
+});
+
 // Upload contacts
 app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, res) => {
   const id = req.params.id;
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-  const lines   = req.file.buffer.toString('utf-8').replace(/\r/g, '').split('\n');
-  const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
-  const phoneIdx = headers.findIndex(h => h.includes('phone'));
-  const nameIdx  = headers.findIndex(h => h.includes('first') || h === 'name');
-  const addrIdx  = headers.findIndex(h => h.includes('address'));
-  const cityIdx  = headers.findIndex(h => h === 'city');
-  const stIdx    = headers.findIndex(h => h === 'state');
-  const zipIdx   = headers.findIndex(h => h.includes('zip'));
+  const lines      = req.file.buffer.toString('utf-8').replace(/\r/g, '').split('\n');
+  const rawHeaders = parseCSVLine(lines[0]);
+  const auto = detectColumns(rawHeaders);
 
-  if (phoneIdx < 0) return res.status(400).json({ error: 'No phone column found in CSV' });
+  // Allow the frontend to override any auto-detected column after user confirms the mapping preview
+  const toIdx = v => (v === undefined || v === '' || v === null) ? undefined : parseInt(v);
+  const phoneIdx = toIdx(req.body.phoneCol) ?? auto.phoneIdx;
+  const nameIdx  = toIdx(req.body.nameCol)  ?? auto.nameIdx;
+  const addrIdx  = toIdx(req.body.addrCol)  ?? auto.addrIdx;
+  const cityIdx  = toIdx(req.body.cityCol)  ?? auto.cityIdx;
+  const stIdx    = toIdx(req.body.stateCol) ?? auto.stIdx;
+  const zipIdx   = toIdx(req.body.zipCol)   ?? auto.zipIdx;
+
+  if (phoneIdx < 0 || phoneIdx === undefined) return res.status(400).json({ error: 'No phone column found in CSV — please map it manually' });
 
   const optOuts  = new Set((await sb.get('kmc_opt_outs', 'select=phone')).map(r => r.phone));
   const existing = new Set((await sb.get('kmc_contacts', `campaign_id=eq.${id}&select=phone`)).map(r => r.phone));
