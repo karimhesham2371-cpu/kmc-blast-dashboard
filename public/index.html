@@ -787,6 +787,7 @@ async function renderInbox() {
         <button class="filter-pill active" onclick="setInboxDays(7)"  id="pill-days-7">7 Days</button>
         <button class="filter-pill" onclick="setInboxDays(30)" id="pill-days-30">30 Days</button>
         <button class="filter-pill" onclick="setInboxDays(0)"  id="pill-days-0">All Time</button>
+        <button class="filter-pill" onclick="clearInboxFilters()" id="pill-clear" style="margin-left:auto;color:var(--muted)">✕ Clear Filters</button>
       </div>
       <div id="conv-list-items"><div style="padding:40px;text-align:center"><div class="loader"></div></div></div>
     </div>
@@ -810,6 +811,22 @@ function setInboxDays(days) {
   document.querySelectorAll('#inbox-date-filters .filter-pill').forEach(p => p.classList.remove('active'));
   const pill = document.getElementById('pill-days-' + days);
   if (pill) pill.classList.add('active');
+  refreshInbox();
+}
+
+// Reset every Inbox filter (reply-type pill, date range, search box) back to
+// defaults and force a fresh fetch — a one-click substitute for the hard
+// refresh some stale filter combinations previously required.
+function clearInboxFilters() {
+  inboxFilter = 'all';
+  inboxDays = 7;
+  inboxSearch = '';
+  document.querySelectorAll('#inbox-filters .filter-pill').forEach(p => p.classList.remove('active'));
+  document.getElementById('pill-all')?.classList.add('active');
+  document.querySelectorAll('#inbox-date-filters .filter-pill').forEach(p => p.classList.remove('active'));
+  document.getElementById('pill-days-7')?.classList.add('active');
+  const searchInput = document.getElementById('inbox-search-input');
+  if (searchInput) searchInput.value = '';
   refreshInbox();
 }
 
