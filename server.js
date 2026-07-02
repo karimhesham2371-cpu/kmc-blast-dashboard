@@ -319,61 +319,83 @@ function sendWindowBlockedMessage() {
   return `Sending is restricted to 9:00 AM – 6:00 PM Eastern to prevent off-hours texting. It is currently ${easternTimeLabel()}. Please try again within the allowed window.`;
 }
 
+// In-flight lock — prevents two overlapping runBlast() calls for the same campaign
+// (e.g. the 10-min auto-loop firing while a manual "Blast Now" is still mid-send)
+// from each reading the same stale sent_today and both independently blasting up to
+// the full daily cap, doubling the actual volume sent. This was the root cause of a
+// campaign with daily_limit:400 sending 602 messages in one day.
+const blastingCampaigns = new Set();
+
 async function runBlast(campaign) {
-  const id      = campaign.id;
-  const today   = new Date().toISOString().slice(0, 10);
-  const sentSoFar = campaign.last_sent_date === today ? (campaign.sent_today || 0) : 0;
-  const cap       = (campaign.daily_limit || 200) - sentSoFar;
-  if (cap <= 0) return { sent: 0, reason: 'daily limit reached' };
-
-  // Hard guard — always enforced, regardless of campaign.quiet_hours_enabled
-  if (!isWithinSendWindow()) {
-    return { sent: 0, reason: sendWindowBlockedMessage() };
+  const id = campaign.id;
+  if (blastingCampaigns.has(id)) {
+    console.log(`[Blast] "${campaign.name}" skipped — already in progress`);
+    return { sent: 0, reason: 'blast already in progress' };
   }
+  blastingCampaigns.add(id);
+  try {
+    const today   = new Date().toISOString().slice(0, 10);
+    const sentSoFar = campaign.last_sent_date === today ? (campaign.sent_today || 0) : 0;
+    const cap       = (campaign.daily_limit || 200) - sentSoFar;
+    if (cap <= 0) return { sent: 0, reason: 'daily limit reached' };
 
-  const pending = await sb.get('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&limit=${cap}&order=created_at.asc`);
-  if (!pending.length) {
-    await sb.patch('kmc_campaigns', `id=eq.${id}`, { status: 'completed', updated_at: new Date().toISOString() });
-    return { sent: 0, reason: 'completed' };
-  }
-
-  // Build the pool of available message variants (1-3), rotated round-robin per contact
-  const variants = [campaign.message, campaign.message_2, campaign.message_3].filter(v => v && v.trim());
-
-  const optOuts = new Set((await sb.get('kmc_opt_outs', 'select=phone')).map(r => r.phone));
-  let sent = 0, failed = 0, ni = 0;
-
-  for (const contact of pending) {
-    if (optOuts.has(contact.phone)) {
-      await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { status: 'opted_out' });
-      continue;
+    // Hard guard — always enforced, regardless of campaign.quiet_hours_enabled
+    if (!isWithinSendWindow()) {
+      return { sent: 0, reason: sendWindowBlockedMessage() };
     }
-    const from = KMC_NUMBERS[ni % KMC_NUMBERS.length];
-    const variantIdx = ni % variants.length;
-    const template = variants[variantIdx];
-    ni++;
-    const text = (template || '')
-      .replace(/\{name\}/gi,    contact.first_name || '')
-      .replace(/\{address\}/gi, contact.address    || '');
 
-    const r  = await sendSMS(from, contact.phone, text);
-    const st = r.ok ? 'sent' : 'failed';
+    const pending = await sb.get('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&limit=${cap}&order=created_at.asc`);
+    if (!pending.length) {
+      await sb.patch('kmc_campaigns', `id=eq.${id}`, { status: 'completed', updated_at: new Date().toISOString() });
+      return { sent: 0, reason: 'completed' };
+    }
 
-    await Promise.all([
-      sb.post('kmc_outbound', { campaign_id: id, from, to: contact.phone, text, status: st, telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-      sb.patch('kmc_contacts', `id=eq.${contact.id}`, { status: st, sent_at: new Date().toISOString(), assigned_from: from, message_variant: variantIdx + 1 }),
-    ]);
+    // Build the pool of available message variants (1-3), rotated round-robin per contact
+    const variants = [campaign.message, campaign.message_2, campaign.message_3].filter(v => v && v.trim());
 
-    if (r.ok) sent++; else failed++;
-    // Human-like jitter: 1.8s-2.8s between sends instead of a fixed robotic cadence
-    await sleep(1800 + Math.floor(Math.random() * 1000));
+    const optOuts = new Set((await sb.get('kmc_opt_outs', 'select=phone')).map(r => r.phone));
+    let sent = 0, failed = 0, ni = 0;
+
+    for (const contact of pending) {
+      // Re-check the send window on every iteration too, in case a long-running blast
+      // crosses the 6pm ET cutoff mid-run.
+      if (!isWithinSendWindow()) break;
+
+      if (optOuts.has(contact.phone)) {
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { status: 'opted_out' });
+        continue;
+      }
+      const from = KMC_NUMBERS[ni % KMC_NUMBERS.length];
+      const variantIdx = ni % variants.length;
+      const template = variants[variantIdx];
+      ni++;
+      const text = (template || '')
+        .replace(/\{name\}/gi,    contact.first_name || '')
+        .replace(/\{address\}/gi, contact.address    || '');
+
+      const r  = await sendSMS(from, contact.phone, text);
+      const st = r.ok ? 'sent' : 'failed';
+
+      await Promise.all([
+        sb.post('kmc_outbound', { campaign_id: id, from, to: contact.phone, text, status: st, telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+        sb.patch('kmc_contacts', `id=eq.${contact.id}`, { status: st, sent_at: new Date().toISOString(), assigned_from: from, message_variant: variantIdx + 1 }),
+      ]);
+
+      if (r.ok) sent++; else failed++;
+      // Persist sent_today after every message (not just at the end) so the cap
+      // reflects live progress even if the process restarts or crashes mid-blast.
+      await sb.patch('kmc_campaigns', `id=eq.${id}`, {
+        sent_today: sentSoFar + sent, last_sent_date: today, updated_at: new Date().toISOString(),
+      });
+      // Human-like jitter: 1.8s-2.8s between sends instead of a fixed robotic cadence
+      await sleep(1800 + Math.floor(Math.random() * 1000));
+    }
+
+    console.log(`[Blast] "${campaign.name}" → sent:${sent} failed:${failed}`);
+    return { sent, failed };
+  } finally {
+    blastingCampaigns.delete(id);
   }
-
-  await sb.patch('kmc_campaigns', `id=eq.${id}`, {
-    sent_today: sentSoFar + sent, last_sent_date: today, updated_at: new Date().toISOString(),
-  });
-  console.log(`[Blast] "${campaign.name}" → sent:${sent} failed:${failed}`);
-  return { sent, failed };
 }
 
 app.post('/api/campaigns/:id/blast', auth, async (req, res) => {
