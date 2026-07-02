@@ -455,10 +455,18 @@ app.post('/api/campaigns/:id/blast', auth, async (req, res) => {
 });
 
 // Inbox
+// Optional ?days=N restricts to conversations with activity in the last N days —
+// keeps the (now correctly-uncapped) full-history fetch fast for routine polling
+// instead of re-pulling every message ever sent on every 10s auto-refresh.
 app.get('/api/inbox', auth, async (req, res) => {
+  const days = parseInt(req.query.days);
+  const sinceISO = (days > 0) ? new Date(Date.now() - days * 86400000).toISOString() : null;
+  const inboundQs  = 'order=timestamp.desc' + (sinceISO ? `&timestamp=gte.${sinceISO}` : '');
+  const outboundQs = 'order=sent_at.desc'   + (sinceISO ? `&sent_at=gte.${sinceISO}`   : '');
+
   const [inbound, outbound, contacts, campaigns] = await Promise.all([
-    sb.getAll('kmc_replies',  'order=timestamp.desc'),
-    sb.getAll('kmc_outbound', 'order=sent_at.desc'),
+    sb.getAll('kmc_replies',  inboundQs),
+    sb.getAll('kmc_outbound', outboundQs),
     sb.getAll('kmc_contacts', 'select=phone,first_name,campaign_id&order=created_at.desc'),
     sb.get('kmc_campaigns','select=id,auto_reply_enabled,auto_reply_message'),
   ]);

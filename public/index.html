@@ -286,6 +286,7 @@ let inboxSearch = '';
 let inboxFilter = 'all'; // all | yes | no | unread
 let inboxRefreshTimer = null;
 let inboxReadTs = {}; // phone → timestamp of last time we opened that conv
+let inboxDays = 7; // date-range filter sent to /api/inbox: 1 | 7 | 30 | 0(=all time)
 const KMC_NUMBERS = ['+12109856004','+17869499467','+14709320125','+19163474799','+13126752435'];
 const KMC_LABELS  = {
   '+12109856004': 'San Antonio TX',
@@ -781,6 +782,12 @@ async function renderInbox() {
         <button class="filter-pill pill-yes"      onclick="setInboxFilter('yes')"    id="pill-yes">✅ Interested</button>
         <button class="filter-pill pill-no"       onclick="setInboxFilter('no')"     id="pill-no">❌ Objections</button>
       </div>
+      <div class="inbox-filters" id="inbox-date-filters" style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
+        <button class="filter-pill" onclick="setInboxDays(1)"  id="pill-days-1">Today</button>
+        <button class="filter-pill active" onclick="setInboxDays(7)"  id="pill-days-7">7 Days</button>
+        <button class="filter-pill" onclick="setInboxDays(30)" id="pill-days-30">30 Days</button>
+        <button class="filter-pill" onclick="setInboxDays(0)"  id="pill-days-0">All Time</button>
+      </div>
       <div id="conv-list-items"><div style="padding:40px;text-align:center"><div class="loader"></div></div></div>
     </div>
     <div class="thread-panel" id="thread-panel">
@@ -792,14 +799,24 @@ async function renderInbox() {
 
 function setInboxFilter(f) {
   inboxFilter = f;
-  document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('#inbox-filters .filter-pill').forEach(p => p.classList.remove('active'));
   const pill = document.getElementById('pill-' + f);
   if (pill) pill.classList.add('active');
   renderConvList();
 }
 
+function setInboxDays(days) {
+  inboxDays = days;
+  document.querySelectorAll('#inbox-date-filters .filter-pill').forEach(p => p.classList.remove('active'));
+  const pill = document.getElementById('pill-days-' + days);
+  if (pill) pill.classList.add('active');
+  refreshInbox();
+}
+
 async function refreshInbox() {
-  inboxData = await apiJ('/api/inbox');
+  const list = document.getElementById('conv-list-items');
+  if (list && !inboxData.length) list.innerHTML = '<div style="padding:40px;text-align:center"><div class="loader"></div></div>';
+  inboxData = await apiJ(`/api/inbox?days=${inboxDays}`);
 
   // Mark a conversation unread if the last message is inbound AND we haven't
   // opened it since that message arrived (tracked in inboxReadTs via localStorage)
