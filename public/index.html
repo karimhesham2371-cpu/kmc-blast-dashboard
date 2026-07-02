@@ -873,11 +873,15 @@ async function refreshInbox() {
 function filterConvs(q) { inboxSearch = q.toLowerCase(); renderConvList(); }
 
 function computeIsUnread(c) {
-  const lastMsg  = c.messages.at(-1);
   const lastRead = inboxReadTs[c.phone] || 0;
-  const notRepliedBack   = !!(lastMsg && lastMsg.dir === 'in');
-  const hasUnviewedInbound = c.messages.some(msg => msg.dir === 'in' && new Date(msg.ts) > new Date(lastRead));
-  return notRepliedBack || hasUnviewedInbound;
+  // Unread = there's an inbound message we haven't viewed yet (arrived after
+  // our last-viewed timestamp for this phone). Checking ALL messages, not
+  // just the last one, is what correctly catches the case where an
+  // auto-reply fires immediately after an inbound "yes" — the thread's last
+  // message becomes outbound, but the inbound one before it is still
+  // unviewed. Once you open the conversation, lastRead updates and this
+  // clears for good until a genuinely new inbound message arrives.
+  return c.messages.some(msg => msg.dir === 'in' && new Date(msg.ts) > new Date(lastRead));
 }
 
 function renderConvList() {
