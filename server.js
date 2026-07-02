@@ -24,7 +24,7 @@ const YES_RE      = /^(yes|y|yep|yeah|sure|interested|definitely|ok|okay|sounds 
 const NO_RE       = /^(no|nope|not interested|already sold|sold|never mind|nah|not selling)[\s.!,]?$/i;
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
-function sbReq(method, table, body, qs) {
+function sbReq(method, table, body, qs, range) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : null;
     const h = {
@@ -34,6 +34,7 @@ function sbReq(method, table, body, qs) {
     if (method === 'POST')  h.Prefer = 'resolution=ignore-duplicates,return=representation';
     if (method === 'PATCH') h.Prefer = 'return=representation';
     if (payload) h['Content-Length'] = Buffer.byteLength(payload);
+    if (range) { h['Range-Unit'] = 'items'; h.Range = range; }
     const req = https.request({
       hostname: SB_HOST,
       path: `/rest/v1/${table}${qs ? '?' + qs : ''}`,
@@ -42,8 +43,8 @@ function sbReq(method, table, body, qs) {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => {
-        try { resolve({ ok: res.statusCode < 300, status: res.statusCode, data: d ? JSON.parse(d) : null }); }
-        catch { resolve({ ok: false, status: res.statusCode, data: d }); }
+        try { resolve({ ok: res.statusCode < 300, status: res.statusCode, data: d ? JSON.parse(d) : null, headers: res.headers }); }
+        catch { resolve({ ok: false, status: res.statusCode, data: d, headers: res.headers }); }
       });
     });
     req.on('error', reject);
@@ -52,11 +53,50 @@ function sbReq(method, table, body, qs) {
   });
 }
 
+// Supabase/PostgREST on this project enforces a hard 1000-row cap per request
+// regardless of any `limit=` query param — confirmed by testing directly against
+// the API (limit=20000 still returned Content-Range: 0-999/*). This silently
+// truncated the Inbox (outbound history), cross-campaign dedup checks, and
+// campaign contact counts on any table that grew past 1000 rows, with no error
+// surfaced anywhere. getAll() pages through with explicit Range headers in
+// 1000-row chunks until a short page confirms there's nothing left, so callers
+// that need the FULL table (dedup checks, counts, inbox history) always get it.
+const PAGE_SIZE = 1000;
+async function sbGetAll(table, qs) {
+  let start = 0, all = [];
+  for (;;) {
+    const end = start + PAGE_SIZE - 1;
+    const r = await sbReq('GET', table, null, qs, `${start}-${end}`);
+    const page = Array.isArray(r.data) ? r.data : [];
+    all = all.concat(page);
+    if (page.length < PAGE_SIZE) break;
+    start += PAGE_SIZE;
+  }
+  return all;
+}
+// Same as getAll, but stops once `wanted` rows are collected — for callers that
+// need an exact, possibly-large N (e.g. pulling `cap` pending contacts for a
+// blast where cap could exceed 1000) without over-fetching the whole table.
+async function sbGetUpTo(table, qs, wanted) {
+  let start = 0, all = [];
+  while (all.length < wanted) {
+    const end = start + PAGE_SIZE - 1;
+    const r = await sbReq('GET', table, null, qs, `${start}-${end}`);
+    const page = Array.isArray(r.data) ? r.data : [];
+    all = all.concat(page);
+    if (page.length < PAGE_SIZE) break;
+    start += PAGE_SIZE;
+  }
+  return all.slice(0, wanted);
+}
+
 const sb = {
-  get:    (t, qs)    => sbReq('GET',    t, null, qs).then(r => Array.isArray(r.data) ? r.data : []),
-  post:   (t, rows)  => sbReq('POST',   t, Array.isArray(rows) ? rows : [rows]),
-  patch:  (t, qs, b) => sbReq('PATCH',  t, b, qs),
-  del:    (t, qs)    => sbReq('DELETE', t, null, qs),
+  get:     (t, qs)        => sbReq('GET',    t, null, qs).then(r => Array.isArray(r.data) ? r.data : []),
+  getAll:  (t, qs)        => sbGetAll(t, qs),
+  getUpTo: (t, qs, n)     => sbGetUpTo(t, qs, n),
+  post:    (t, rows)      => sbReq('POST',   t, Array.isArray(rows) ? rows : [rows]),
+  patch:   (t, qs, b)     => sbReq('PATCH',  t, b, qs),
+  del:     (t, qs)        => sbReq('DELETE', t, null, qs),
 };
 
 // ── Telnyx ────────────────────────────────────────────────────────────────────
@@ -110,9 +150,9 @@ app.get('/api/stats', auth, async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const [campaigns, optOuts, replies, sentToday] = await Promise.all([
     sb.get('kmc_campaigns', 'select=id,status,total_contacts,sent_today'),
-    sb.get('kmc_opt_outs',  'select=phone'),
-    sb.get('kmc_replies',   'select=type'),
-    sb.get('kmc_outbound',  `select=id&sent_at=gte.${today}T00:00:00Z`),
+    sb.getAll('kmc_opt_outs',  'select=phone'),
+    sb.getAll('kmc_replies',   'select=type'),
+    sb.getAll('kmc_outbound',  `select=id&sent_at=gte.${today}T00:00:00Z`),
   ]);
   res.json({
     campaigns:      campaigns.length,
@@ -161,11 +201,11 @@ app.delete('/api/campaigns/:id', auth, async (req, res) => {
 app.get('/api/campaigns/:id/stats', auth, async (req, res) => {
   const id = req.params.id;
   const [all, pending, sent, failed, opted] = await Promise.all([
-    sb.get('kmc_contacts', `campaign_id=eq.${id}&select=id`),
-    sb.get('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&select=id`),
-    sb.get('kmc_contacts', `campaign_id=eq.${id}&status=eq.sent&select=id`),
-    sb.get('kmc_contacts', `campaign_id=eq.${id}&status=eq.failed&select=id`),
-    sb.get('kmc_contacts', `campaign_id=eq.${id}&status=eq.opted_out&select=id`),
+    sb.getAll('kmc_contacts', `campaign_id=eq.${id}&select=id`),
+    sb.getAll('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&select=id`),
+    sb.getAll('kmc_contacts', `campaign_id=eq.${id}&status=eq.sent&select=id`),
+    sb.getAll('kmc_contacts', `campaign_id=eq.${id}&status=eq.failed&select=id`),
+    sb.getAll('kmc_contacts', `campaign_id=eq.${id}&status=eq.opted_out&select=id`),
   ]);
   res.json({ total: all.length, pending: pending.length, sent: sent.length, failed: failed.length, opted_out: opted.length });
 });
@@ -224,10 +264,10 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
   if (phoneIdx < 0 || phoneIdx === undefined) return res.status(400).json({ error: 'No phone column found in CSV — please map it manually' });
 
   const [optOutRows, thisCampRows, otherCampRows, outboundRows] = await Promise.all([
-    sb.get('kmc_opt_outs',  'select=phone'),
-    sb.get('kmc_contacts',  `campaign_id=eq.${id}&select=phone`),
-    sb.get('kmc_contacts',  `campaign_id=neq.${id}&select=phone,status`),
-    sb.get('kmc_outbound',  'select=to'),
+    sb.getAll('kmc_opt_outs',  'select=phone'),
+    sb.getAll('kmc_contacts',  `campaign_id=eq.${id}&select=phone`),
+    sb.getAll('kmc_contacts',  `campaign_id=neq.${id}&select=phone,status`),
+    sb.getAll('kmc_outbound',  'select=to'),
   ]);
   const optOuts  = new Set(optOutRows.map(r => r.phone));
   const existing = new Set(thisCampRows.map(r => r.phone));
@@ -272,7 +312,7 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
     if (r.ok && r.data) inserted += r.data.length;
   }
 
-  const total = (await sb.get('kmc_contacts', `campaign_id=eq.${id}&select=id`)).length;
+  const total = (await sb.getAll('kmc_contacts', `campaign_id=eq.${id}&select=id`)).length;
   await sb.patch('kmc_campaigns', `id=eq.${id}`, { total_contacts: total, updated_at: new Date().toISOString() });
   res.json({ inserted, dupes, blocked, invalid, crossCampaign, total_in_campaign: total });
 });
@@ -344,7 +384,7 @@ async function runBlast(campaign) {
       return { sent: 0, reason: sendWindowBlockedMessage() };
     }
 
-    const pending = await sb.get('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&limit=${cap}&order=created_at.asc`);
+    const pending = await sb.getUpTo('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&order=created_at.asc`, cap);
     if (!pending.length) {
       await sb.patch('kmc_campaigns', `id=eq.${id}`, { status: 'completed', updated_at: new Date().toISOString() });
       return { sent: 0, reason: 'completed' };
@@ -353,7 +393,7 @@ async function runBlast(campaign) {
     // Build the pool of available message variants (1-3), rotated round-robin per contact
     const variants = [campaign.message, campaign.message_2, campaign.message_3].filter(v => v && v.trim());
 
-    const optOuts = new Set((await sb.get('kmc_opt_outs', 'select=phone')).map(r => r.phone));
+    const optOuts = new Set((await sb.getAll('kmc_opt_outs', 'select=phone')).map(r => r.phone));
     let sent = 0, failed = 0, ni = 0;
 
     for (const contact of pending) {
@@ -408,7 +448,7 @@ app.post('/api/campaigns/:id/blast', auth, async (req, res) => {
   const today   = new Date().toISOString().slice(0, 10);
   const soFar   = c.last_sent_date === today ? (c.sent_today || 0) : 0;
   const cap     = (c.daily_limit || 200) - soFar;
-  const pending = await sb.get('kmc_contacts', `campaign_id=eq.${req.params.id}&status=eq.pending&select=id`);
+  const pending = await sb.getAll('kmc_contacts', `campaign_id=eq.${req.params.id}&status=eq.pending&select=id`);
 
   res.json({ ok: true, queued: Math.min(pending.length, Math.max(0, cap)), cap, pending: pending.length });
   setImmediate(() => runBlast(c));
@@ -417,9 +457,9 @@ app.post('/api/campaigns/:id/blast', auth, async (req, res) => {
 // Inbox
 app.get('/api/inbox', auth, async (req, res) => {
   const [inbound, outbound, contacts, campaigns] = await Promise.all([
-    sb.get('kmc_replies',  'order=timestamp.desc&limit=20000'),
-    sb.get('kmc_outbound', 'order=sent_at.desc&limit=20000'),
-    sb.get('kmc_contacts', 'select=phone,first_name,campaign_id&order=created_at.desc&limit=50000'),
+    sb.getAll('kmc_replies',  'order=timestamp.desc'),
+    sb.getAll('kmc_outbound', 'order=sent_at.desc'),
+    sb.getAll('kmc_contacts', 'select=phone,first_name,campaign_id&order=created_at.desc'),
     sb.get('kmc_campaigns','select=id,auto_reply_enabled,auto_reply_message'),
   ]);
 
@@ -509,7 +549,7 @@ app.patch('/api/messages/:id/type', auth, async (req, res) => {
 
 // Opt-outs
 app.get('/api/opt-outs', auth, async (req, res) => {
-  res.json(await sb.get('kmc_opt_outs', 'order=created_at.desc&limit=2000'));
+  res.json(await sb.getAll('kmc_opt_outs', 'order=created_at.desc'));
 });
 app.post('/api/opt-outs', auth, async (req, res) => {
   const { phone, reason } = req.body;
