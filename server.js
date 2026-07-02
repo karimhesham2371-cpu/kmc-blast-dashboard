@@ -110,8 +110,13 @@ function sendSMS(from, to, text) {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => {
-        try { const j = JSON.parse(d); resolve({ ok: res.statusCode === 200, id: j?.data?.id, status: res.statusCode }); }
-        catch { resolve({ ok: false, status: res.statusCode }); }
+        try {
+          const j = JSON.parse(d);
+          const errDetail = j?.errors?.map(e => e.detail || e.title).join('; ');
+          if (errDetail) console.error(`[Telnyx ${res.statusCode}] from:${from} to:${to} → ${errDetail}`);
+          resolve({ ok: res.statusCode === 200, id: j?.data?.id, status: res.statusCode, errDetail });
+        }
+        catch { console.error(`[Telnyx ${res.statusCode}] from:${from} to:${to} → unparseable body: ${d.slice(0,200)}`); resolve({ ok: false, status: res.statusCode }); }
       });
     });
     req.on('error', e => resolve({ ok: false, error: e.message }));
@@ -536,7 +541,8 @@ app.post('/api/send', auth, async (req, res) => {
   if (optOut.length) return res.status(400).json({ error: 'Number has opted out' });
   const r = await sendSMS(from, to, text);
   if (r.ok) await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'sent', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
-  res.json({ ok: r.ok, id: r.id, status: r.status });
+  else await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+  res.json({ ok: r.ok, id: r.id, status: r.status, error: r.ok ? undefined : (r.errDetail || `Telnyx rejected the message (HTTP ${r.status})`) });
 });
 
 // Delete a single message (inbound from kmc_replies, outbound from kmc_outbound)
