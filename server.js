@@ -487,15 +487,23 @@ app.get('/api/inbox', auth, async (req, res) => {
   const m = {};
   for (const r of outbound) {
     if (!r.to) continue;
-    if (!m[r.to]) m[r.to] = { phone: r.to, messages: [], lastActivity: '', hasReplied: false, replyType: null };
+    if (!m[r.to]) m[r.to] = { phone: r.to, messages: [], lastActivity: '', hasReplied: false, replyType: null, lastInboundTs: null };
     m[r.to].messages.push({ id: r.id, dir: 'out', text: r.text, ts: r.sent_at, from: r.from });
     if (r.sent_at > m[r.to].lastActivity) m[r.to].lastActivity = r.sent_at;
   }
   for (const r of inbound) {
     const p = r.from;
-    if (!m[p]) m[p] = { phone: p, messages: [], lastActivity: '', hasReplied: true, replyType: r.type };
+    if (!m[p]) m[p] = { phone: p, messages: [], lastActivity: '', hasReplied: false, replyType: null, lastInboundTs: null };
     m[p].messages.push({ id: r.id, dir: 'in', text: r.text, ts: r.timestamp, type: r.type, to: r.to });
-    m[p].hasReplied = true; m[p].replyType = r.type;
+    m[p].hasReplied = true;
+    // The conversation's classification (yes/no/other) must reflect the MOST
+    // RECENT inbound message, not just whichever one this loop happens to
+    // process last — sb.getAll() pages don't guarantee processing order lines
+    // up with `timestamp.desc`, so track explicitly by comparing timestamps.
+    if (!m[p].lastInboundTs || r.timestamp > m[p].lastInboundTs) {
+      m[p].lastInboundTs = r.timestamp;
+      m[p].replyType = r.type;
+    }
     if (r.timestamp > m[p].lastActivity) m[p].lastActivity = r.timestamp;
   }
 
@@ -506,6 +514,7 @@ app.get('/api/inbox', auth, async (req, res) => {
     c.name = contact?.name || '';
     const camp = contact?.campaign;
     c.autoReplyMessage = (camp?.auto_reply_enabled && camp.auto_reply_message) ? camp.auto_reply_message : null;
+    delete c.lastInboundTs;
     return c;
   }).sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
 

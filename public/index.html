@@ -781,6 +781,7 @@ async function renderInbox() {
         <button class="filter-pill pill-unread"   onclick="setInboxFilter('unread')" id="pill-unread">🔵 Unread</button>
         <button class="filter-pill pill-yes"      onclick="setInboxFilter('yes')"    id="pill-yes">✅ Interested</button>
         <button class="filter-pill pill-no"       onclick="setInboxFilter('no')"     id="pill-no">❌ Objections</button>
+        <button class="filter-pill"               onclick="setInboxFilter('other')"  id="pill-other">💬 Others</button>
       </div>
       <div class="inbox-filters" id="inbox-date-filters" style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
         <button class="filter-pill" onclick="setInboxDays(1)"  id="pill-days-1">Today</button>
@@ -835,20 +836,22 @@ async function refreshInbox() {
   if (list && !inboxData.length) list.innerHTML = '<div style="padding:40px;text-align:center"><div class="loader"></div></div>';
   inboxData = await apiJ(`/api/inbox?days=${inboxDays}`);
 
-  // Mark a conversation unread if the last message is inbound AND we haven't
-  // opened it since that message arrived (tracked in inboxReadTs via localStorage)
+  // A conversation is Unread if EITHER half of "we haven't dealt with this
+  // reply yet" is true: we haven't replied back since their last inbound
+  // message (last message in the thread is still inbound), OR we haven't
+  // actually viewed it yet (an inbound message arrived after our last-viewed
+  // timestamp — this also catches the case where an auto-reply fired
+  // automatically right after their message, so the thread's last message
+  // is outbound even though a human never looked at the inbound one).
   const savedTs = JSON.parse(localStorage.getItem('kmc_read_ts') || '{}');
   inboxReadTs = savedTs;
-  inboxData.forEach(c => {
-    const lastMsg  = c.messages.at(-1);
-    const lastRead = inboxReadTs[c.phone] || 0;
-    c.isUnread = lastMsg && lastMsg.dir === 'in' && new Date(lastMsg.ts) > new Date(lastRead);
-  });
+  inboxData.forEach(c => { c.isUnread = computeIsUnread(c); });
 
   // Counts for pill labels
   const unreadCount = inboxData.filter(c => c.isUnread).length;
   const yesCount    = inboxData.filter(c => c.replyType === 'yes').length;
   const noCount     = inboxData.filter(c => c.replyType === 'no').length;
+  const otherCount  = inboxData.filter(c => c.hasReplied && c.replyType === 'other').length;
 
   const badge = document.getElementById('inbox-badge');
   if (badge) { badge.textContent = unreadCount || inboxData.length; badge.style.display = inboxData.length > 0 ? '' : 'none'; }
@@ -856,21 +859,25 @@ async function refreshInbox() {
   const pillUnread = document.getElementById('pill-unread');
   const pillYes    = document.getElementById('pill-yes');
   const pillNo     = document.getElementById('pill-no');
+  const pillOther  = document.getElementById('pill-other');
   const pillAll    = document.getElementById('pill-all');
   if (pillAll)    pillAll.textContent    = `All (${inboxData.length})`;
   if (pillUnread) pillUnread.textContent = `🔵 Unread (${unreadCount})`;
   if (pillYes)    pillYes.textContent    = `✅ Interested (${yesCount})`;
   if (pillNo)     pillNo.textContent     = `❌ Objections (${noCount})`;
+  if (pillOther)  pillOther.textContent  = `💬 Others (${otherCount})`;
 
   renderConvList();
 }
 
 function filterConvs(q) { inboxSearch = q.toLowerCase(); renderConvList(); }
 
-function isUnread(c) {
+function computeIsUnread(c) {
   const lastMsg  = c.messages.at(-1);
   const lastRead = inboxReadTs[c.phone] || 0;
-  return lastMsg && lastMsg.dir === 'in' && new Date(lastMsg.ts) > new Date(lastRead);
+  const notRepliedBack   = !!(lastMsg && lastMsg.dir === 'in');
+  const hasUnviewedInbound = c.messages.some(msg => msg.dir === 'in' && new Date(msg.ts) > new Date(lastRead));
+  return notRepliedBack || hasUnviewedInbound;
 }
 
 function renderConvList() {
@@ -880,8 +887,9 @@ function renderConvList() {
   let list = inboxData;
 
   // Apply active filter
-  if (inboxFilter === 'yes')    list = list.filter(c => c.replyType === 'yes');
-  else if (inboxFilter === 'no') list = list.filter(c => c.replyType === 'no');
+  if (inboxFilter === 'yes')        list = list.filter(c => c.replyType === 'yes');
+  else if (inboxFilter === 'no')    list = list.filter(c => c.replyType === 'no');
+  else if (inboxFilter === 'other') list = list.filter(c => c.hasReplied && c.replyType === 'other');
   else if (inboxFilter === 'unread') list = list.filter(c => c.isUnread);
 
   // Apply search
