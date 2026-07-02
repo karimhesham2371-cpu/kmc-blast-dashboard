@@ -395,8 +395,8 @@ app.post('/api/campaigns/:id/blast', auth, async (req, res) => {
 // Inbox
 app.get('/api/inbox', auth, async (req, res) => {
   const [inbound, outbound, contacts, campaigns] = await Promise.all([
-    sb.get('kmc_replies',  'order=timestamp.desc&limit=2000'),
-    sb.get('kmc_outbound', 'order=sent_at.desc&limit=2000'),
+    sb.get('kmc_replies',  'order=timestamp.desc&limit=20000'),
+    sb.get('kmc_outbound', 'order=sent_at.desc&limit=20000'),
     sb.get('kmc_contacts', 'select=phone,first_name,campaign_id&order=created_at.desc&limit=50000'),
     sb.get('kmc_campaigns','select=id,auto_reply_enabled,auto_reply_message'),
   ]);
