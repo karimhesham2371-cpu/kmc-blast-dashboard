@@ -286,6 +286,7 @@ app.get('/api/campaigns/:id/contacts', auth, async (req, res) => {
 
 // Activate / Pause
 app.post('/api/campaigns/:id/activate', auth, async (req, res) => {
+  if (!isWithinSendWindow()) return res.status(403).json({ error: sendWindowBlockedMessage() });
   await sb.patch('kmc_campaigns', `id=eq.${req.params.id}`, { status: 'active', updated_at: new Date().toISOString() });
   res.json({ ok: true });
 });
@@ -294,14 +295,28 @@ app.post('/api/campaigns/:id/pause', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Blast engine
-const SEND_TIMEZONE = 'America/New_York'; // Render's server clock runs in UTC — always compute the send window in Eastern time explicitly, never server-local time
+// ── Global send-window guard ───────────────────────────────────────────────────
+// HARD, non-bypassable rule — independent of any per-campaign "quiet hours" toggle.
+// Render's server clock runs in UTC, so the hour is always computed explicitly in
+// America/New_York (handles EST/EDT automatically) rather than relying on server-local time.
+// This exists specifically to prevent a repeat of the incident where a timezone bug let a
+// campaign start blasting at ~5am Eastern. Do not make this optional or campaign-configurable.
+const SEND_TIMEZONE    = 'America/New_York';
+const SEND_WINDOW_START = 9;  // 9:00 AM Eastern
+const SEND_WINDOW_END   = 18; // 6:00 PM Eastern (blast must stop sending at/after this hour)
 
-function inQuietHours() {
-  // Compliance-friendly send window: 9:00 AM – 8:59 PM Eastern (covers TCPA's 8am-9pm recipient-local guidance
-  // reasonably well for a KMC number base that's largely Central/Eastern; adjust SEND_TIMEZONE above if needed)
-  const hr = parseInt(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: SEND_TIMEZONE }).format(new Date()));
-  return hr < 9 || hr >= 21;
+function easternHour() {
+  return parseInt(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: SEND_TIMEZONE }).format(new Date()));
+}
+function easternTimeLabel() {
+  return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: SEND_TIMEZONE }).format(new Date()) + ' ET';
+}
+function isWithinSendWindow() {
+  const hr = easternHour();
+  return hr >= SEND_WINDOW_START && hr < SEND_WINDOW_END;
+}
+function sendWindowBlockedMessage() {
+  return `Sending is restricted to 9:00 AM – 6:00 PM Eastern to prevent off-hours texting. It is currently ${easternTimeLabel()}. Please try again within the allowed window.`;
 }
 
 async function runBlast(campaign) {
@@ -311,8 +326,9 @@ async function runBlast(campaign) {
   const cap       = (campaign.daily_limit || 200) - sentSoFar;
   if (cap <= 0) return { sent: 0, reason: 'daily limit reached' };
 
-  if (campaign.quiet_hours_enabled && inQuietHours()) {
-    return { sent: 0, reason: 'quiet hours (9am-9pm window)' };
+  // Hard guard — always enforced, regardless of campaign.quiet_hours_enabled
+  if (!isWithinSendWindow()) {
+    return { sent: 0, reason: sendWindowBlockedMessage() };
   }
 
   const pending = await sb.get('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&limit=${cap}&order=created_at.asc`);
@@ -361,6 +377,7 @@ async function runBlast(campaign) {
 }
 
 app.post('/api/campaigns/:id/blast', auth, async (req, res) => {
+  if (!isWithinSendWindow()) return res.status(403).json({ error: sendWindowBlockedMessage() });
   const campaigns = await sb.get('kmc_campaigns', `id=eq.${req.params.id}`);
   if (!campaigns.length) return res.status(404).json({ error: 'Not found' });
   const c = campaigns[0];

@@ -688,12 +688,14 @@ async function blastNow(id) {
   const btn = document.getElementById('blast-btn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loader"></span> Sending...'; }
   const r = await apiJ(`/api/campaigns/${id}/blast`, { method:'POST' });
+  if (r.error) { toast(r.error, 'error'); if (btn) { btn.disabled = false; btn.innerHTML = '⚡ Blast Now'; } return; }
   toast(r.queued > 0 ? `⚡ Queued ${r.queued} messages!` : r.message || 'Nothing to send');
   setTimeout(() => renderCampDetail(id), 2000);
 }
 
 async function activateCamp(id, refresh) {
-  await apiJ(`/api/campaigns/${id}/activate`, { method:'POST' });
+  const r = await apiJ(`/api/campaigns/${id}/activate`, { method:'POST' });
+  if (r.error) { toast(r.error, 'error'); return; }
   toast('Campaign activated ✓');
   if (refresh) renderCampDetail(id); else renderCampaigns();
 }
