@@ -295,9 +295,12 @@ app.post('/api/campaigns/:id/pause', auth, async (req, res) => {
 });
 
 // Blast engine
+const SEND_TIMEZONE = 'America/New_York'; // Render's server clock runs in UTC — always compute the send window in Eastern time explicitly, never server-local time
+
 function inQuietHours() {
-  // Compliance-friendly send window: 9:00 AM – 8:59 PM server time
-  const hr = new Date().getHours();
+  // Compliance-friendly send window: 9:00 AM – 8:59 PM Eastern (covers TCPA's 8am-9pm recipient-local guidance
+  // reasonably well for a KMC number base that's largely Central/Eastern; adjust SEND_TIMEZONE above if needed)
+  const hr = parseInt(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: SEND_TIMEZONE }).format(new Date()));
   return hr < 9 || hr >= 21;
 }
 
