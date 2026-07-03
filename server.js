@@ -641,19 +641,56 @@ app.delete('/api/opt-outs/:phone', auth, async (req, res) => {
 });
 
 // Telnyx inbound webhook — auto opt-out on STOP, save to kmc_replies
+// Auto-reply, isolated in its own function with its own try/catch so a
+// failure here can NEVER take down the inbound-logging step above it (or
+// vice versa) — previously both lived under one try/catch, so if logging
+// the inbound reply hit a transient error (e.g. a Supabase network hiccup
+// on the response side, even after the row was actually written), the
+// whole handler aborted and the auto-reply step below it silently never
+// ran, with only a generic `[webhook] <message>` line to show for it.
+async function maybeAutoReply(from, to, type) {
+  if (type !== 'yes') return;
+  try {
+    const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(from)}&order=created_at.desc&limit=1`);
+    const contact = contacts[0];
+    if (!contact)              { console.log(`[AutoReply] skip ${from} — no kmc_contacts row found`); return; }
+    if (contact.auto_replied)  { console.log(`[AutoReply] skip ${from} — auto_replied already true (contact ${contact.id})`); return; }
+    if (!contact.campaign_id)  { console.log(`[AutoReply] skip ${from} — contact ${contact.id} has no campaign_id`); return; }
+
+    const camps = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
+    const camp = camps[0];
+    if (!camp)                              { console.log(`[AutoReply] skip ${from} — campaign ${contact.campaign_id} not found`); return; }
+    if (!camp.auto_reply_enabled)           { console.log(`[AutoReply] skip ${from} — auto-reply OFF for campaign "${camp.name}"`); return; }
+    if (!camp.auto_reply_message?.trim())   { console.log(`[AutoReply] skip ${from} — campaign "${camp.name}" has an empty auto-reply message`); return; }
+
+    const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+    const replyText = camp.auto_reply_message
+      .replace(/\{name\}/gi,    contact.first_name || '')
+      .replace(/\{address\}/gi, contact.address    || '');
+    const r = await sendSMS(replyFrom, from, replyText);
+    await Promise.all([
+      sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: replyText, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+      sb.patch('kmc_contacts', `id=eq.${contact.id}`, { auto_replied: true }),
+    ]);
+    console.log(`[AutoReply] ${r.ok ? 'sent' : 'FAILED'} — ${camp.name} → ${from} | "${replyText.slice(0, 60)}"${r.errDetail ? ' — ' + r.errDetail : ''}`);
+  } catch (e) {
+    console.error(`[AutoReply] threw for ${from}:`, e.message);
+  }
+}
+
 app.post('/webhook/sms', async (req, res) => {
   if (req.query.token !== WH_TOKEN) return res.status(401).end();
   res.sendStatus(200);
+  let from, to, type = 'other';
   try {
     const ev = req.body;
     if (ev.data?.event_type !== 'message.received') return;
     const msg  = ev.data.payload;
-    const from = msg.from?.phone_number;
-    const to   = msg.to?.[0]?.phone_number;
+    from = msg.from?.phone_number;
+    to   = msg.to?.[0]?.phone_number;
     const text = (msg.text || '').trim();
     if (!from || !to || !KMC_SET.has(to)) return;
 
-    let type = 'other';
     if (STOP_RE.test(text)) {
       type = 'no';
       await Promise.all([
@@ -665,30 +702,16 @@ app.post('/webhook/sms', async (req, res) => {
 
     await sb.post('kmc_replies', { from, to, text, type, timestamp: new Date().toISOString(), synced: false });
     console.log(`[Inbound] ${type.toUpperCase()} | ${from} → ${to} | "${text.slice(0, 60)}"`);
+  } catch(e) {
+    console.error('[webhook] failed to log inbound reply:', e.message);
+    // Fall through anyway — if we at least parsed `from`/`type` before the
+    // error, still give the contact a shot at their auto-reply rather than
+    // losing it entirely because logging hiccuped.
+  }
 
-    // Auto-reply on interest: find which campaign this contact belongs to and,
-    // if that campaign has an auto-reply configured, send it once.
-    if (type === 'yes') {
-      const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(from)}&order=created_at.desc&limit=1`);
-      const contact = contacts[0];
-      if (contact && !contact.auto_replied && contact.campaign_id) {
-        const camps = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
-        const camp = camps[0];
-        if (camp?.auto_reply_enabled && camp.auto_reply_message?.trim()) {
-          const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
-          const replyText = camp.auto_reply_message
-            .replace(/\{name\}/gi,    contact.first_name || '')
-            .replace(/\{address\}/gi, contact.address    || '');
-          const r = await sendSMS(replyFrom, from, replyText);
-          await Promise.all([
-            sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: replyText, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-            sb.patch('kmc_contacts', `id=eq.${contact.id}`, { auto_replied: true }),
-          ]);
-          console.log(`[AutoReply] ${camp.name} → ${from} | "${replyText.slice(0, 60)}"`);
-        }
-      }
-    }
-  } catch(e) { console.error('[webhook]', e.message); }
+  // Runs regardless of whether the block above succeeded, as long as we
+  // parsed a phone number and classified the message as "yes".
+  if (from && to) await maybeAutoReply(from, to, type);
 });
 
 // Auto-blast active campaigns every 10 minutes
