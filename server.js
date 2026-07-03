@@ -595,7 +595,24 @@ app.get('/api/debug/auto-reply/:phone', auth, async (req, res) => {
       blockedBecause: reasons,
     };
   });
-  res.json({ phone, totalContactRecords: records.length, records });
+
+  // Also pull the RAW inbound + outbound history for this exact phone string,
+  // all-time (no date cutoff) — this tells us whether the webhook ever even
+  // logged a "yes" for this number more than once, and whether an auto-reply
+  // attempt (sent OR failed) was ever recorded in kmc_outbound, in case it
+  // exists but isn't showing up in the Inbox thread for some other reason.
+  const [inboundRows, outboundRows] = await Promise.all([
+    sb.getAll('kmc_replies',  `from=eq.${encodeURIComponent(phone)}&order=timestamp.desc`),
+    sb.getAll('kmc_outbound', `to=eq.${encodeURIComponent(phone)}&order=sent_at.desc`),
+  ]);
+
+  res.json({
+    phone,
+    totalContactRecords: records.length,
+    records,
+    inboundHistory: inboundRows.map(r => ({ id: r.id, type: r.type, text: r.text?.slice(0, 60), timestamp: r.timestamp })),
+    outboundHistory: outboundRows.map(r => ({ id: r.id, campaign_id: r.campaign_id, status: r.status, text: r.text?.slice(0, 60), sent_at: r.sent_at, telnyx_id: r.telnyx_id })),
+  });
 });
 
 // Reclassify an inbound message type (yes / no / other)

@@ -1046,7 +1046,10 @@ async function diagnoseAutoReply(phone) {
       rec.blockedBecause.length ? `  ⚠️ BLOCKED: ${rec.blockedBecause.join('; ')}` : '  ✅ Nothing here would block an auto-reply',
     ].join('\n');
   });
-  alert(`Auto-reply diagnosis for ${phone}\n(${r.totalContactRecords} contact record${r.totalContactRecords>1?'s':''} found)\n\n${lines.join('\n\n')}`);
+  const inLines  = (r.inboundHistory  || []).map(m => `  [${m.type}] ${m.timestamp} — "${m.text}"`).join('\n') || '  (none)';
+  const outLines = (r.outboundHistory || []).map(m => `  [${m.status}${m.campaign_id ? ' / camp ' + m.campaign_id : ''}] ${m.sent_at} — "${m.text}"`).join('\n') || '  (none)';
+
+  alert(`Auto-reply diagnosis for ${phone}\n(${r.totalContactRecords} contact record${r.totalContactRecords>1?'s':''} found)\n\n${lines.join('\n\n')}\n\nAll-time inbound history:\n${inLines}\n\nAll-time outbound history:\n${outLines}`);
 }
 
 async function sendReply(phone) {
