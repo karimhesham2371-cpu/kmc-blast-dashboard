@@ -961,6 +961,7 @@ function openConv(phone) {
     <div class="quick-replies" id="quick-replies" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 14px 8px">
       <button class="btn btn-ghost btn-sm" onclick="useQuickReply('${esc(phone)}')">⚡ Use Auto-Reply Message${displayName?` for ${displayName}`:''}</button>
       <button class="btn btn-ghost btn-sm" onclick="useFollowUpReply('${esc(phone)}')">📋 Follow Up — Filled Form?${displayName?` (${displayName})`:''}</button>
+      <button class="btn btn-ghost btn-sm" onclick="diagnoseAutoReply('${esc(phone)}')">🔍 Diagnose Auto-Reply</button>
     </div>
     <div class="reply-bar">
       <select id="reply-from">
@@ -1022,6 +1023,30 @@ function useFollowUpReply(phone) {
   const conv = inboxData.find(c => c.phone === phone);
   const name = (conv?.name || '').trim();
   fillReplyBox(DEFAULT_FOLLOWUP_MESSAGE.replace(/\{name\}/gi, name || 'there'));
+}
+
+// Replays the exact contact/campaign lookup the auto-reply webhook performs
+// for this phone, and shows why it did or didn't fire — surfaces cases like
+// a phone existing under multiple campaigns (webhook only checks the most
+// recently created contact row), auto-reply toggled off, an empty auto-reply
+// message, or the contact already being marked auto_replied.
+async function diagnoseAutoReply(phone) {
+  const r = await apiJ(`/api/debug/auto-reply/${encodeURIComponent(phone)}`);
+  if (!r || !r.records) { alert('Could not run diagnosis — see console for details.'); console.log(r); return; }
+  if (!r.records.length) { alert(`No kmc_contacts row found at all for ${phone} — the auto-reply webhook has nothing to look up, so it can't fire regardless of campaign settings.`); return; }
+  const lines = r.records.map((rec, i) => {
+    const tag = rec.wouldBePickedByWebhook ? '➡️ WEBHOOK USES THIS ONE' : '(older duplicate, ignored by webhook)';
+    return [
+      `Record ${i + 1} ${tag}`,
+      `  Campaign: ${rec.campaign_name || '(none)'} (id: ${rec.campaign_id || 'null'})`,
+      `  Created: ${rec.created_at}`,
+      `  auto_reply_enabled: ${rec.auto_reply_enabled}`,
+      `  auto_reply_message set: ${!!rec.auto_reply_message_preview}${rec.auto_reply_message_preview ? ' — "' + rec.auto_reply_message_preview + '..."' : ''}`,
+      `  auto_replied already sent: ${rec.auto_replied}`,
+      rec.blockedBecause.length ? `  ⚠️ BLOCKED: ${rec.blockedBecause.join('; ')}` : '  ✅ Nothing here would block an auto-reply',
+    ].join('\n');
+  });
+  alert(`Auto-reply diagnosis for ${phone}\n(${r.totalContactRecords} contact record${r.totalContactRecords>1?'s':''} found)\n\n${lines.join('\n\n')}`);
 }
 
 async function sendReply(phone) {

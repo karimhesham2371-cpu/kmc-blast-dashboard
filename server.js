@@ -562,6 +562,42 @@ app.delete('/api/messages/:id', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Diagnostic: replay the exact lookup the auto-reply webhook does for a phone
+// number, so we can see WHY it did or didn't fire without touching the DB by
+// hand. Shows every kmc_contacts row for this phone (a phone can appear in
+// more than one campaign), which one the webhook's `limit=1` lookup would
+// actually pick (most recently created), and that record's campaign/auto-
+// reply/auto_replied state.
+app.get('/api/debug/auto-reply/:phone', auth, async (req, res) => {
+  const phone = decodeURIComponent(req.params.phone);
+  const contacts = await sb.getAll('kmc_contacts', `phone=eq.${encodeURIComponent(phone)}&order=created_at.desc`);
+  const campIds = [...new Set(contacts.map(c => c.campaign_id).filter(Boolean))];
+  const camps = {};
+  for (const id of campIds) {
+    const rows = await sb.get('kmc_campaigns', `id=eq.${id}`);
+    camps[id] = rows[0] || null;
+  }
+  const records = contacts.map((c, i) => {
+    const camp = c.campaign_id ? camps[c.campaign_id] : null;
+    const reasons = [];
+    if (!c.campaign_id) reasons.push('contact has no campaign_id');
+    if (c.campaign_id && !camp) reasons.push('campaign_id points to a campaign that no longer exists');
+    if (camp && !camp.auto_reply_enabled) reasons.push('campaign auto-reply is OFF');
+    if (camp && camp.auto_reply_enabled && !camp.auto_reply_message?.trim()) reasons.push('campaign auto-reply message is empty');
+    if (c.auto_replied) reasons.push('auto_replied already true on this contact row — auto-reply already sent once and will not resend');
+    return {
+      wouldBePickedByWebhook: i === 0, // webhook does order=created_at.desc&limit=1
+      contact_id: c.id, created_at: c.created_at, status: c.status,
+      campaign_id: c.campaign_id, campaign_name: camp?.name || null,
+      auto_reply_enabled: camp?.auto_reply_enabled ?? null,
+      auto_reply_message_preview: camp?.auto_reply_message ? camp.auto_reply_message.slice(0, 60) : null,
+      auto_replied: c.auto_replied,
+      blockedBecause: reasons,
+    };
+  });
+  res.json({ phone, totalContactRecords: records.length, records });
+});
+
 // Reclassify an inbound message type (yes / no / other)
 app.patch('/api/messages/:id/type', auth, async (req, res) => {
   const { type } = req.body;
