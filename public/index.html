@@ -967,7 +967,7 @@ function openConv(phone) {
       <select id="reply-from">
         ${KMC_NUMBERS.map(n => `<option value="${n}">${KMC_LABELS[n]||n}</option>`).join('')}
       </select>
-      <textarea id="reply-text" placeholder="Type a message..." rows="1" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply('${esc(phone)}')}"></textarea>
+      <textarea id="reply-text" placeholder="Type a message..." rows="1" oninput="pendingIsAutoReplySend=false;this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply('${esc(phone)}')}"></textarea>
       <button class="btn btn-primary" onclick="sendReply('${esc(phone)}')">Send</button>
     </div>
   `;
@@ -1002,6 +1002,14 @@ const DEFAULT_QUICK_REPLY = "Awesome, {name}! Just fill out this quick form and 
 // Follow-up for contacts who were already sent the auto-reply but haven't filled out the form yet
 const DEFAULT_FOLLOWUP_MESSAGE = "Hey {name}, just checking in — were you able to fill out the quick form? Once we get that, we can call you with a cash offer that fits your needs. Here's the link again if you need it: https://kmcashoffers.com/get-offer";
 
+// Tracks whether the text currently sitting in the reply box is the verbatim
+// auto-reply template (filled in via the "Use Auto-Reply Message" button) —
+// if so, sendReply() tells the backend to mark this contact's auto_replied
+// flag, so the reconciliation safety net won't try to auto-send them a
+// duplicate later. Any manual edit to the box, or using the Follow-Up
+// template instead, clears this back to false.
+let pendingIsAutoReplySend = false;
+
 function fillReplyBox(text) {
   const box = document.getElementById('reply-text');
   if (box) {
@@ -1017,12 +1025,14 @@ function useQuickReply(phone) {
   const template = conv?.autoReplyMessage || DEFAULT_QUICK_REPLY;
   const name = (conv?.name || '').trim();
   fillReplyBox(template.replace(/\{name\}/gi, name || 'there'));
+  pendingIsAutoReplySend = true;
 }
 
 function useFollowUpReply(phone) {
   const conv = inboxData.find(c => c.phone === phone);
   const name = (conv?.name || '').trim();
   fillReplyBox(DEFAULT_FOLLOWUP_MESSAGE.replace(/\{name\}/gi, name || 'there'));
+  pendingIsAutoReplySend = false;
 }
 
 // Replays the exact contact/campaign lookup the auto-reply webhook performs
@@ -1058,7 +1068,9 @@ async function sendReply(phone) {
   if (!from || !text) return;
   const btn = document.querySelector('.reply-bar .btn-primary');
   if (btn) btn.disabled = true;
-  const r = await apiJ('/api/send', { method:'POST', body: { from, to: phone, text } });
+  const markAutoReplied = pendingIsAutoReplySend;
+  const r = await apiJ('/api/send', { method:'POST', body: { from, to: phone, text, markAutoReplied } });
+  pendingIsAutoReplySend = false;
   if (r.ok) {
     toast('Sent ✓');
     document.getElementById('reply-text').value = '';

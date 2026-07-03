@@ -542,14 +542,29 @@ app.post('/api/campaigns/:id/test-send', auth, async (req, res) => {
 });
 
 // Manual send
+// `markAutoReplied` is sent by the frontend when the user used the "Use
+// Auto-Reply Message" quick-reply button — it tells us this manual send IS
+// the auto-reply for this contact, so we should flip contact.auto_replied to
+// true just like the webhook path does. Without this, a contact who was
+// manually sent their auto-reply (because the automatic webhook path failed
+// or was skipped) would still show auto_replied=false forever, and the
+// reconciliation job below would try to auto-send them a duplicate.
 app.post('/api/send', auth, async (req, res) => {
-  const { from, to, text } = req.body;
+  const { from, to, text, markAutoReplied } = req.body;
   if (!from || !to || !text) return res.status(400).json({ error: 'from, to, text required' });
   if (!KMC_SET.has(from))   return res.status(400).json({ error: 'Invalid from number' });
   const optOut = await sb.get('kmc_opt_outs', `phone=eq.${encodeURIComponent(to)}`);
   if (optOut.length) return res.status(400).json({ error: 'Number has opted out' });
   const r = await sendSMS(from, to, text);
-  if (r.ok) await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'sent', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+  if (r.ok) {
+    await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'sent', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+    if (markAutoReplied) {
+      try {
+        const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(to)}&order=created_at.desc&limit=1`);
+        if (contacts[0]) await sb.patch('kmc_contacts', `id=eq.${contacts[0].id}`, { auto_replied: true });
+      } catch (e) { console.error('[api/send] failed to mark auto_replied:', e.message); }
+    }
+  }
   else await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
   res.json({ ok: r.ok, id: r.id, status: r.status, error: r.ok ? undefined : (r.errDetail || `Telnyx rejected the message (HTTP ${r.status})`) });
 });
@@ -721,5 +736,47 @@ setInterval(async () => {
     for (const c of active) await runBlast(c);
   } catch(e) { console.error('[auto-blast]', e.message); }
 }, 10 * 60 * 1000);
+
+// Self-healing safety net: re-scan recent "yes" replies and re-run the exact
+// same maybeAutoReply() eligibility check the webhook uses. This is a pure
+// backstop — it does NOT assume we know why an auto-reply might be missed
+// (webhook downtime, a thrown error, Render restarting mid-request, a future
+// bug nobody has thought of yet). It just periodically asks "is there anyone
+// who said yes and still hasn't gotten their auto-reply?" and if so, sends
+// it. Safe to run as often as we like because maybeAutoReply() already
+// no-ops for any contact with auto_replied=true (including ones handled
+// manually via the "Use Auto-Reply Message" quick-reply button, which now
+// also sets that flag on send — see /api/send above), so this can never
+// double-send.
+async function reconcileMissedAutoReplies() {
+  try {
+    // Only look back 7 days — anything older is assumed either handled or
+    // stale enough that the user would rather review it manually than get a
+    // surprise auto-reply days later.
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const yesReplies = await sb.getAll('kmc_replies', `type=eq.yes&timestamp=gte.${since}&order=timestamp.desc`);
+    if (!yesReplies.length) return;
+
+    // One check per unique phone is enough — maybeAutoReply looks up the
+    // contact's most recent "yes" state via kmc_contacts, not per-message.
+    const seen = new Set();
+    let checked = 0;
+    for (const reply of yesReplies) {
+      if (seen.has(reply.from)) continue;
+      seen.add(reply.from);
+      checked++;
+      await maybeAutoReply(reply.from, reply.to, 'yes');
+    }
+    console.log(`[Reconcile] checked ${checked} unique "yes" repliers from the last 7 days`);
+  } catch (e) {
+    console.error('[Reconcile] failed:', e.message);
+  }
+}
+
+// Run shortly after boot (in case something was missed while the server was
+// down/restarting) and then every 10 minutes going forward, offset from the
+// auto-blast loop so they don't hammer Supabase in the same tick.
+setTimeout(reconcileMissedAutoReplies, 60 * 1000);
+setInterval(reconcileMissedAutoReplies, 10 * 60 * 1000);
 
 app.listen(PORT, () => console.log(`KMC Blast Dashboard → http://localhost:${PORT}`));
