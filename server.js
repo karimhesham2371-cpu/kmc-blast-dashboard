@@ -3,6 +3,7 @@ const express  = require('express');
 const multer   = require('multer');
 const https    = require('https');
 const path     = require('path');
+const chrono   = require('chrono-node');
 
 const app    = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024 } });
@@ -22,6 +23,18 @@ const KMC_SET     = new Set(KMC_NUMBERS);
 const STOP_RE     = /^(stop|unsubscribe|quit|cancel|end|remove me|opt.?out)[\s.!,]?$/i;
 const YES_RE      = /^(yes|y|yep|yeah|sure|interested|definitely|ok|okay|sounds good|let'?s go|sign me up)[\s.!,]?$/i;
 const NO_RE       = /^(no|nope|not interested|already sold|sold|never mind|nah|not selling)[\s.!,]?$/i;
+
+// ── Callback-scheduling flow: message templates (verbatim per spec) ───────────
+const MSG_A_TEMPLATE      = "Great! When's a good time to give you a quick call back about {PROPERTY_ADDRESS}?";
+const MSG_B_TEMPLATE      = "Perfect, {TIME_ECHO} works 👍 One thing before I call — so I can bring you an actual number instead of wasting your time with 20 questions, mind filling this quick property form? Takes 2 min: {FORM_LINK}. Talk at {TIME_SHORT}!";
+const MSG_B_VAGUE_SUFFIX  = "Talk then!";
+const MSG_B_NOW_TEMPLATE  = "On it — calling you in a few minutes 👍 If you get 30 seconds first, this quick form helps me bring you an actual number: {FORM_LINK}";
+// The optional 4h nudge for AWAITING_CALLBACK_TIME (Step 5.6) — default OFF.
+// Flip to true if you want it live; it will never send more than once per
+// contact (checked against kmc_outbound history for this exact text).
+const NUDGE_ENABLED       = false;
+const NUDGE_DELAY_MS      = 4 * 60 * 60 * 1000;
+const NUDGE_TEXT          = "No rush — just let me know a good time and I'll call you then 👍";
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
 function sbReq(method, table, body, qs, range) {
@@ -472,7 +485,7 @@ app.get('/api/inbox', auth, async (req, res) => {
   const [inbound, outbound, contacts, campaigns] = await Promise.all([
     sb.getAll('kmc_replies',  inboundQs),
     sb.getAll('kmc_outbound', outboundQs),
-    sb.getAll('kmc_contacts', 'select=phone,first_name,campaign_id&order=created_at.desc'),
+    sb.getAll('kmc_contacts', 'select=phone,first_name,campaign_id,flow_state,scheduled_call_time_utc,needs_human,needs_human_reason&order=created_at.desc'),
     sb.get('kmc_campaigns','select=id,auto_reply_enabled,auto_reply_message'),
   ]);
 
@@ -481,7 +494,11 @@ app.get('/api/inbox', auth, async (req, res) => {
   const contactByPhone = {};
   for (const c of contacts) {
     if (!c.phone || contactByPhone[c.phone]) continue;
-    contactByPhone[c.phone] = { name: (c.first_name || '').trim(), campaign: campById[c.campaign_id] || null };
+    contactByPhone[c.phone] = {
+      name: (c.first_name || '').trim(), campaign: campById[c.campaign_id] || null,
+      flowState: c.flow_state || null, scheduledCallTimeUtc: c.scheduled_call_time_utc || null,
+      needsHuman: !!c.needs_human, needsHumanReason: c.needs_human_reason || null,
+    };
   }
 
   const m = {};
@@ -514,6 +531,10 @@ app.get('/api/inbox', auth, async (req, res) => {
     c.name = contact?.name || '';
     const camp = contact?.campaign;
     c.autoReplyMessage = (camp?.auto_reply_enabled && camp.auto_reply_message) ? camp.auto_reply_message : null;
+    c.flowState = contact?.flowState || null;
+    c.scheduledCallTimeUtc = contact?.scheduledCallTimeUtc || null;
+    c.needsHuman = contact?.needsHuman || false;
+    c.needsHumanReason = contact?.needsHumanReason || null;
     delete c.lastInboundTs;
     return c;
   }).sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
@@ -655,62 +676,251 @@ app.delete('/api/opt-outs/:phone', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Telnyx inbound webhook — auto opt-out on STOP, save to kmc_replies
-// Auto-reply, isolated in its own function with its own try/catch so a
-// failure here can NEVER take down the inbound-logging step above it (or
-// vice versa) — previously both lived under one try/catch, so if logging
-// the inbound reply hit a transient error (e.g. a Supabase network hiccup
-// on the response side, even after the row was actually written), the
-// whole handler aborted and the auto-reply step below it silently never
-// ran, with only a generic `[webhook] <message>` line to show for it.
-async function maybeAutoReply(from, to, type) {
-  if (type !== 'yes') return;
+// ── Callback-scheduling flow: time parsing ─────────────────────────────────────
+// When chrono resolves an hour but couldn't tell AM from PM (e.g. "tomorrow at
+// 3", "at 7" from a bare-number rewrite), chrono's own default is inconsistent
+// (sometimes AM, sometimes it guesses right from context words like "tonight").
+// Per spec: prefer whichever of the AM/PM readings falls in the plausible
+// call window (8 AM–9 PM); if both or neither qualify, prefer PM (evening
+// callback is the safer default for this business).
+function resolveAmbiguousMeridiem(date, tz) {
+  const hour24 = parseInt(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: tz }).format(date));
+  const hour12 = hour24 % 12;
+  const amVariant = hour12;
+  const pmVariant = hour12 + 12;
+  const inWindow = h => h >= 8 && h < 21;
+  let chosen;
+  if (inWindow(pmVariant) && !inWindow(amVariant)) chosen = pmVariant;
+  else if (inWindow(amVariant) && !inWindow(pmVariant)) chosen = amVariant;
+  else chosen = pmVariant; // both or neither qualify — default to PM
+  return new Date(date.getTime() + (chosen - hour24) * 3600000);
+}
+
+// Returns { kind: 'now'|'specific'|'vague'|'none', date: Date|null }
+// - 'now'      → "now"/"asap"/"call me now" → Message B (now variant), call ASAP
+// - 'specific' → an exact clock time was given → Message B, echo TIME_SHORT
+// - 'vague'    → a broad window ("whenever", "tomorrow afternoon", "Tuesday",
+//                "after 5") → Message B (vague variant, "Talk then!")
+// - 'none'     → no parseable time (a question, an objection, anything else)
+//                → caller must NOT auto-reply; flag needs_human instead
+function parseCallbackTime(text, tz) {
+  const raw = (text || '').trim();
+  if (!raw) return { kind: 'none', date: null };
+  // A question mixed in with a time ("7pm but who is this?") must NOT be
+  // auto-confirmed — a human should handle it, per spec's explicit edge case.
+  if (/\?/.test(raw)) return { kind: 'none', date: null };
+  if (/\b(now|asap|right now|call me now)\b/i.test(raw)) return { kind: 'now', date: new Date() };
+  if (/\b(anytime|whenever)\b/i.test(raw)) return { kind: 'vague', date: null };
+
+  const ref  = new Date();
+  const opts = { forwardDate: true, timezone: tz };
+
+  // "after 5" / "after 5pm" describes an open-ended window, not a fixed
+  // moment — always vague, regardless of whether chrono can resolve an hour.
+  // No forwardDate here (see note below on the bare-hour branch) — with no
+  // other date anchor, chrono's own forward-rolling would push a still-
+  // upcoming-today PM reading to tomorrow before we get to pick it.
+  if (/\bafter\s+\d{1,2}\b/i.test(raw)) {
+    const r = chrono.parse(raw.replace(/\bafter\s+(\d{1,2})/i, 'from $1'), ref, { timezone: tz });
+    if (!r.length) return { kind: 'vague', date: null };
+    let d = r[0].start.date();
+    if (!r[0].start.isCertain('meridiem')) {
+      d = resolveAmbiguousMeridiem(d, tz);
+      if (d.getTime() <= ref.getTime()) d = new Date(d.getTime() + 86400000);
+    }
+    return { kind: 'vague', date: d };
+  }
+
+  let results = chrono.parse(raw, ref, opts);
+  // Bare hour numbers ("7", or the first number in "7 or 8") aren't parsed by
+  // chrono on their own — prefixing "at " gets it to treat it as a time.
+  // Deliberately no forwardDate for this fallback: with no other date anchor
+  // (weekday, "tomorrow", etc.), chrono defaults the ambiguous meridiem to AM
+  // and — with forwardDate — rolls the whole calendar day forward whenever
+  // that AM guess has already passed, even if the PM reading (chosen below)
+  // is still hours away today. E.g. bare "7" received at 2 PM must mean 7 PM
+  // *today* per spec, not 7 PM tomorrow. We resolve the meridiem ourselves
+  // first, then only roll forward a day if the chosen reading has itself
+  // already passed relative to ref.
+  if (!results.length && /\b([1-9]|1[0-2])\b/.test(raw)) {
+    results = chrono.parse('at ' + raw, ref, { timezone: tz });
+  }
+  if (!results.length) return { kind: 'none', date: null };
+
+  const c = results[0];
+  let date = c.start.date();
+  if (!c.start.isCertain('meridiem')) {
+    date = resolveAmbiguousMeridiem(date, tz);
+    if (date.getTime() <= ref.getTime()) date = new Date(date.getTime() + 86400000);
+  }
+  const kind = c.start.isCertain('hour') ? 'specific' : 'vague';
+  return { kind, date };
+}
+
+// Lightly normalizes the lead's own phrasing for the {TIME_ECHO} placeholder —
+// per spec, we echo their wording back, not a converted timestamp string
+// ("tomorrow at 3" stays "tomorrow at 3"). The one exception: a bare number
+// ("7") is echoed with its resolved AM/PM so the confirmation isn't itself
+// ambiguous to the lead.
+function normalizeTimeEcho(raw, kind, date, tz) {
+  const trimmed = raw.trim();
+  if (/^\d{1,2}$/.test(trimmed) && date) return formatTimeShort(date, tz);
+  let out = trimmed.replace(/(\d{1,2}(:\d{2})?)\s*([ap])\.?m\.?/gi, (m, h, min, ap) => `${h} ${ap.toUpperCase()}M`);
+  return out.charAt(0).toUpperCase() + out.slice(1);
+}
+
+// {TIME_SHORT} — "7 PM" (today), "7 PM tomorrow", or "7 PM Tue" (further out)
+function formatTimeShort(date, tz, ref = new Date()) {
+  const hasMinutes = new Intl.DateTimeFormat('en-US', { minute: 'numeric', timeZone: tz }).format(date) !== '0';
+  const hourLabel = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: hasMinutes ? '2-digit' : undefined, hour12: true, timeZone: tz }).format(date);
+  const dayKey = d => new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(d); // yyyy-mm-dd, stable for comparison
+  if (dayKey(date) === dayKey(ref)) return hourLabel;
+  const tomorrow = new Date(ref.getTime() + 86400000);
+  if (dayKey(date) === dayKey(tomorrow)) return `${hourLabel} tomorrow`;
+  const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: tz }).format(date);
+  return `${hourLabel} ${weekday}`;
+}
+
+// ── Callback-scheduling flow: per-conversation state machine ───────────────────
+// Restructures the old "YES → instant form link" auto-reply into:
+//   AWAITING_INTEREST → (YES) → Message A (ask for a callback time) → AWAITING_CALLBACK_TIME
+//   AWAITING_CALLBACK_TIME → (parseable time) → Message B (+ form link, now with
+//     context) → CALL_SCHEDULED
+//   AWAITING_CALLBACK_TIME → (anything unparseable) → needs_human, no auto-reply
+//   CALL_SCHEDULED → (any further inbound) → needs_human, no auto-reply (never
+//     restarts the flow or re-sends the form link)
+// Isolated in its own try/catch, same reasoning as the old maybeAutoReply: a
+// failure here can never take down the inbound-logging step above it.
+async function advanceFlow(from, to, type, text) {
   try {
     const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(from)}&order=created_at.desc&limit=1`);
     const contact = contacts[0];
-    if (!contact)              { console.log(`[AutoReply] skip ${from} — no kmc_contacts row found`); return; }
-    if (contact.auto_replied)  { console.log(`[AutoReply] skip ${from} — auto_replied already true (contact ${contact.id})`); return; }
-    if (!contact.campaign_id)  { console.log(`[AutoReply] skip ${from} — contact ${contact.id} has no campaign_id`); return; }
+    if (!contact) { console.log(`[Flow] skip ${from} — no kmc_contacts row found`); return; }
+    if (contact.flow_state === 'OPTED_OUT' || contact.status === 'opted_out') {
+      console.log(`[Flow] skip ${from} — opted out`); return;
+    }
 
-    const camps = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
-    const camp = camps[0];
-    if (!camp)                              { console.log(`[AutoReply] skip ${from} — campaign ${contact.campaign_id} not found`); return; }
-    if (!camp.auto_reply_enabled)           { console.log(`[AutoReply] skip ${from} — auto-reply OFF for campaign "${camp.name}"`); return; }
-    if (!camp.auto_reply_message?.trim())   { console.log(`[AutoReply] skip ${from} — campaign "${camp.name}" has an empty auto-reply message`); return; }
+    const tz = contact.lead_timezone || 'America/New_York';
 
-    const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
-    const replyText = camp.auto_reply_message
-      .replace(/\{name\}/gi,    contact.first_name || '')
-      .replace(/\{address\}/gi, contact.address    || '');
-    const r = await sendSMS(replyFrom, from, replyText);
-    await Promise.all([
-      sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: replyText, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-      sb.patch('kmc_contacts', `id=eq.${contact.id}`, { auto_replied: true }),
-    ]);
-    console.log(`[AutoReply] ${r.ok ? 'sent' : 'FAILED'} — ${camp.name} → ${from} | "${replyText.slice(0, 60)}"${r.errDetail ? ' — ' + r.errDetail : ''}`);
+    // ── AWAITING_INTEREST: only a YES advances the flow. NO/other behavior
+    // is completely unchanged (no auto-reply, handled entirely upstream).
+    if (contact.flow_state === 'AWAITING_INTEREST' || !contact.flow_state) {
+      if (type !== 'yes') return;
+      if (!contact.campaign_id) { console.log(`[Flow] skip ${from} — contact ${contact.id} has no campaign_id`); return; }
+      const camps = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
+      const camp = camps[0];
+      if (!camp) { console.log(`[Flow] skip ${from} — campaign ${contact.campaign_id} not found`); return; }
+
+      const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+      const msgA = MSG_A_TEMPLATE.replace(/\{PROPERTY_ADDRESS\}/g, contact.address || 'your property');
+      const r = await sendSMS(replyFrom, from, msgA);
+      await Promise.all([
+        sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: msgA, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+        sb.patch('kmc_contacts', `id=eq.${contact.id}`, { flow_state: 'AWAITING_CALLBACK_TIME', auto_replied: true }),
+      ]);
+      console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} Message A — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
+      return;
+    }
+
+    // ── AWAITING_CALLBACK_TIME: every inbound message here is evaluated only
+    // for whether it contains a usable callback time — the YES/NO/STOP
+    // classification computed upstream doesn't apply to this state at all
+    // (e.g. "sure" matches YES_RE but isn't a time; per spec this state cares
+    // exclusively about time parsing).
+    if (contact.flow_state === 'AWAITING_CALLBACK_TIME') {
+      const parsed = parseCallbackTime(text, tz);
+
+      if (parsed.kind === 'none') {
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'unparseable_time_reply', raw_time_text: text });
+        console.log(`[Flow] ${from} — unparseable time reply, flagged needs_human`);
+        return;
+      }
+
+      // Every path past this point sends a message containing the form
+      // link, so resolve it once up front. Per approved item #4: if the
+      // campaign has no form_link set, do NOT send Message B — flag
+      // needs_human instead rather than sending a broken/blank link.
+      let formLink = null;
+      if (contact.campaign_id) {
+        const camps = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
+        formLink = camps[0]?.form_link || null;
+      }
+      if (!formLink) {
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'missing_form_link', raw_time_text: text });
+        console.log(`[Flow] ${from} — parsed a callback time but campaign has no form_link, flagged needs_human`);
+        return;
+      }
+
+      const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+
+      if (parsed.kind === 'now') {
+        const msg = MSG_B_NOW_TEMPLATE.replace(/\{FORM_LINK\}/g, formLink);
+        const r = await sendSMS(replyFrom, from, msg);
+        await Promise.all([
+          sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+          sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
+            flow_state: 'CALL_SCHEDULED', scheduled_call_time_utc: new Date().toISOString(),
+            raw_time_text: text, form_link_sent_at: new Date().toISOString(),
+          }),
+        ]);
+        console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} Message B (now) → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
+        return;
+      }
+
+      // 'specific' or 'vague' — both send Message B with the form link, just
+      // with different closing lines.
+      const timeEcho  = normalizeTimeEcho(text, parsed.kind, parsed.date, tz);
+      const timeShort = parsed.date ? formatTimeShort(parsed.date, tz) : '';
+      let msg = MSG_B_TEMPLATE.replace(/\{TIME_ECHO\}/g, timeEcho).replace(/\{FORM_LINK\}/g, formLink);
+      msg = parsed.kind === 'vague'
+        ? msg.replace(/Talk at \{TIME_SHORT\}!$/, MSG_B_VAGUE_SUFFIX)
+        : msg.replace(/\{TIME_SHORT\}/g, timeShort);
+
+      const r = await sendSMS(replyFrom, from, msg);
+      await Promise.all([
+        sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+        sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
+          flow_state: 'CALL_SCHEDULED',
+          scheduled_call_time_utc: parsed.date ? parsed.date.toISOString() : null,
+          raw_time_text: text, form_link_sent_at: new Date().toISOString(),
+        }),
+      ]);
+      console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} Message B (${parsed.kind}) → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
+      return;
+    }
+
+    // ── CALL_SCHEDULED: never auto-reply again. A repeat YES is flagged
+    // duplicate_yes; anything else while already scheduled still gets
+    // surfaced to a human rather than silently ignored or auto-answered.
+    if (contact.flow_state === 'CALL_SCHEDULED') {
+      const reason = type === 'yes' ? 'duplicate_yes' : 'message_while_call_scheduled';
+      await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: reason });
+      console.log(`[Flow] ${from} — inbound while CALL_SCHEDULED, flagged needs_human (${reason})`);
+      return;
+    }
   } catch (e) {
-    console.error(`[AutoReply] threw for ${from}:`, e.message);
+    console.error(`[Flow] threw for ${from}:`, e.message);
   }
 }
 
 app.post('/webhook/sms', async (req, res) => {
   if (req.query.token !== WH_TOKEN) return res.status(401).end();
   res.sendStatus(200);
-  let from, to, type = 'other';
+  let from, to, type = 'other', text = '';
   try {
     const ev = req.body;
     if (ev.data?.event_type !== 'message.received') return;
     const msg  = ev.data.payload;
     from = msg.from?.phone_number;
     to   = msg.to?.[0]?.phone_number;
-    const text = (msg.text || '').trim();
+    text = (msg.text || '').trim();
     if (!from || !to || !KMC_SET.has(to)) return;
 
     if (STOP_RE.test(text)) {
       type = 'no';
       await Promise.all([
         sb.post('kmc_opt_outs', { phone: from, reason: 'STOP message', created_at: new Date().toISOString() }),
-        sb.patch('kmc_contacts', `phone=eq.${encodeURIComponent(from)}`, { status: 'opted_out' }),
+        sb.patch('kmc_contacts', `phone=eq.${encodeURIComponent(from)}`, { status: 'opted_out', flow_state: 'OPTED_OUT' }),
       ]);
     } else if (NO_RE.test(text))  type = 'no';
     else if (YES_RE.test(text)) type = 'yes';
@@ -720,13 +930,16 @@ app.post('/webhook/sms', async (req, res) => {
   } catch(e) {
     console.error('[webhook] failed to log inbound reply:', e.message);
     // Fall through anyway — if we at least parsed `from`/`type` before the
-    // error, still give the contact a shot at their auto-reply rather than
+    // error, still give the contact a shot at advancing the flow rather than
     // losing it entirely because logging hiccuped.
   }
 
   // Runs regardless of whether the block above succeeded, as long as we
-  // parsed a phone number and classified the message as "yes".
-  if (from && to) await maybeAutoReply(from, to, type);
+  // parsed a phone number. STOP is already fully handled above (opt-out is
+  // immediate at every state); everything else routes through the state
+  // machine, which itself re-checks opted_out/flow_state before doing
+  // anything, so this is safe even for a STOP message.
+  if (from && to) await advanceFlow(from, to, type, text);
 });
 
 // Auto-blast active campaigns every 10 minutes
@@ -738,38 +951,77 @@ setInterval(async () => {
 }, 10 * 60 * 1000);
 
 // Self-healing safety net: re-scan recent "yes" replies and re-run the exact
-// same maybeAutoReply() eligibility check the webhook uses. This is a pure
-// backstop — it does NOT assume we know why an auto-reply might be missed
-// (webhook downtime, a thrown error, Render restarting mid-request, a future
-// bug nobody has thought of yet). It just periodically asks "is there anyone
-// who said yes and still hasn't gotten their auto-reply?" and if so, sends
-// it. Safe to run as often as we like because maybeAutoReply() already
-// no-ops for any contact with auto_replied=true (including ones handled
-// manually via the "Use Auto-Reply Message" quick-reply button, which now
-// also sets that flag on send — see /api/send above), so this can never
-// double-send.
+// same advanceFlow() eligibility check the webhook uses. This is a pure
+// backstop — it does NOT assume we know why a step might be missed (webhook
+// downtime, a thrown error, Render restarting mid-request, a future bug
+// nobody has thought of yet). It just periodically asks "is there anyone who
+// said yes and is still stuck in AWAITING_INTEREST?" and if so, re-sends
+// Message A.
+//
+// State-aware by design: a contact is only re-processed if they're STILL in
+// flow_state='AWAITING_INTEREST' despite having a "yes" on file. Anyone who
+// has already progressed (AWAITING_CALLBACK_TIME, CALL_SCHEDULED,
+// OPTED_OUT) is left completely alone — re-running advanceFlow on someone
+// already past AWAITING_INTEREST would misinterpret their old "yes" message
+// as a fresh reply to whatever state they're currently in (e.g. it would try
+// to parse "yes" as a callback time for someone in AWAITING_CALLBACK_TIME,
+// or flag a phantom duplicate_yes for someone already CALL_SCHEDULED). This
+// is exactly the same one-time-only guarantee the old auto_replied flag gave
+// us, just expressed through flow_state instead.
 async function reconcileMissedAutoReplies() {
   try {
     // Only look back 7 days — anything older is assumed either handled or
     // stale enough that the user would rather review it manually than get a
-    // surprise auto-reply days later.
+    // surprise message days later.
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const yesReplies = await sb.getAll('kmc_replies', `type=eq.yes&timestamp=gte.${since}&order=timestamp.desc`);
-    if (!yesReplies.length) return;
 
-    // One check per unique phone is enough — maybeAutoReply looks up the
-    // contact's most recent "yes" state via kmc_contacts, not per-message.
     const seen = new Set();
-    let checked = 0;
+    let checked = 0, advanced = 0;
     for (const reply of yesReplies) {
       if (seen.has(reply.from)) continue;
       seen.add(reply.from);
       checked++;
-      await maybeAutoReply(reply.from, reply.to, 'yes');
+
+      const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(reply.from)}&order=created_at.desc&limit=1`);
+      const contact = contacts[0];
+      if (!contact || contact.flow_state !== 'AWAITING_INTEREST') continue; // already progressed — leave alone
+
+      advanced++;
+      await advanceFlow(reply.from, reply.to, 'yes', reply.text);
     }
-    console.log(`[Reconcile] checked ${checked} unique "yes" repliers from the last 7 days`);
+    if (checked) console.log(`[Reconcile] checked ${checked} unique "yes" repliers from the last 7 days — re-sent Message A to ${advanced} still stuck in AWAITING_INTEREST`);
+
+    if (NUDGE_ENABLED) await sendOverdueNudges();
   } catch (e) {
     console.error('[Reconcile] failed:', e.message);
+  }
+}
+
+// Optional Step 5.6 nudge (default OFF — see NUDGE_ENABLED at the top of the
+// file). Finds contacts stuck in AWAITING_CALLBACK_TIME for longer than
+// NUDGE_DELAY_MS and sends exactly one reminder. "Already nudged" is
+// determined by checking kmc_outbound history for a prior send of the exact
+// nudge text to that phone, rather than a dedicated DB column — this keeps
+// the feature fully self-contained (no extra migration needed) while it's
+// off by default; "when they entered AWAITING_CALLBACK_TIME" is likewise
+// approximated from their most recent "yes" in kmc_replies, since that's the
+// message that triggered the transition into this state and no dedicated
+// state-entry timestamp column exists.
+async function sendOverdueNudges() {
+  const stuck = await sb.getAll('kmc_contacts', 'flow_state=eq.AWAITING_CALLBACK_TIME&order=created_at.desc');
+  for (const contact of stuck) {
+    const replies = await sb.get('kmc_replies', `from=eq.${encodeURIComponent(contact.phone)}&type=eq.yes&order=timestamp.desc&limit=1`);
+    const enteredAt = replies[0]?.timestamp;
+    if (!enteredAt || Date.now() - new Date(enteredAt).getTime() < NUDGE_DELAY_MS) continue;
+
+    const already = await sb.get('kmc_outbound', `to=eq.${encodeURIComponent(contact.phone)}&text=eq.${encodeURIComponent(NUDGE_TEXT)}&limit=1`);
+    if (already.length) continue;
+
+    const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : KMC_NUMBERS[0];
+    const r = await sendSMS(replyFrom, contact.phone, NUDGE_TEXT);
+    await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: contact.phone, text: NUDGE_TEXT, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+    console.log(`[Nudge] ${r.ok ? 'sent' : 'FAILED'} → ${contact.phone}`);
   }
 }
 

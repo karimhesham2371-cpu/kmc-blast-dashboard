@@ -942,6 +942,7 @@ function openConv(phone) {
       ${conv.hasReplied ? `<span class="badge ${typeClass}">${conv.replyType||'reply'}</span>` : ''}
       <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="openConvSend('${esc(phone)}')">↗ Reply</button>
     </div>
+    ${formatFlowStateLine(conv)}
     <div class="thread-messages" id="thread-msgs">
       ${conv.messages.map(m => {
         const out = m.dir === 'out';
@@ -1009,6 +1010,27 @@ const DEFAULT_FOLLOWUP_MESSAGE = "Hey {name}, just checking in — were you able
 // duplicate later. Any manual edit to the box, or using the Follow-Up
 // template instead, clears this back to false.
 let pendingIsAutoReplySend = false;
+
+// Small display-only line for the callback-scheduling flow state, per spec
+// Step 7 ("displaying flow_state and the scheduled call time on the
+// conversation view — only if that's a small change"). Deliberately doesn't
+// show anything for AWAITING_INTEREST (the default pre-flow state) since
+// that's just "nothing has happened yet" and not worth calling out.
+function formatFlowStateLine(conv) {
+  const state = conv.flowState;
+  if (!state || state === 'AWAITING_INTEREST') return '';
+  const labels = {
+    AWAITING_CALLBACK_TIME: '🕐 Awaiting callback time',
+    CALL_SCHEDULED: conv.scheduledCallTimeUtc
+      ? `📞 Call scheduled — ${new Date(conv.scheduledCallTimeUtc).toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium', timeStyle: 'short' })} ET`
+      : '📞 Call scheduled — anytime (no specific time given)',
+    OPTED_OUT: '🚫 Opted out',
+    NEEDS_HUMAN: '⚠️ Needs human review',
+  };
+  const label = labels[state] || state;
+  const needsHumanTag = conv.needsHuman ? ` <span style="color:var(--red,#e5484d)">⚠️ needs review${conv.needsHumanReason ? ' — ' + esc(conv.needsHumanReason) : ''}</span>` : '';
+  return `<div style="padding:6px 14px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--border,#2a2a35)">${label}${needsHumanTag}</div>`;
+}
 
 function fillReplyBox(text) {
   const box = document.getElementById('reply-text');
