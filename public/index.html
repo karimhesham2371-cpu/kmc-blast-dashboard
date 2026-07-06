@@ -125,7 +125,8 @@ textarea.form-input{resize:vertical;min-height:100px;font-family:inherit}
 
 /* ── Inbox ── */
 .inbox-layout{display:flex;flex:1;overflow:hidden;background:var(--card);border:1px solid var(--border);border-radius:12px;min-height:0}
-.conv-list{width:300px;min-width:300px;border-right:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
+.conv-list{width:300px;min-width:300px;border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+#conv-list-items{flex:1;overflow-y:auto;position:relative;min-height:0}
 .conv-search{padding:12px;border-bottom:1px solid var(--border)}
 .conv-search input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none}
 .conv-search input:focus{border-color:var(--green)}
@@ -287,6 +288,13 @@ let inboxFilter = 'all'; // all | yes | no | unread
 let inboxRefreshTimer = null;
 let inboxReadTs = {}; // phone → timestamp of last time we opened that conv
 let inboxDays = 7; // date-range filter sent to /api/inbox: 1 | 7 | 30 | 0(=all time)
+// Virtualized conv list — with 3000+ conversations, rendering every row into
+// the DOM at once is what causes the scroll/hover lag. Instead we keep the
+// filtered list in memory and only ever paint the rows currently in (plus a
+// small buffer around) the visible scroll window.
+let convFilteredList = [];
+let convRowHeight = 0;
+let convListScrollBound = false;
 const KMC_NUMBERS = ['+12109856004','+17869499467','+14709320125','+19163474799','+13126752435'];
 const KMC_LABELS  = {
   '+12109856004': 'San Antonio TX',
@@ -804,7 +812,7 @@ function setInboxFilter(f) {
   document.querySelectorAll('#inbox-filters .filter-pill').forEach(p => p.classList.remove('active'));
   const pill = document.getElementById('pill-' + f);
   if (pill) pill.classList.add('active');
-  renderConvList();
+  renderConvList(true);
 }
 
 function setInboxDays(days) {
@@ -812,7 +820,7 @@ function setInboxDays(days) {
   document.querySelectorAll('#inbox-date-filters .filter-pill').forEach(p => p.classList.remove('active'));
   const pill = document.getElementById('pill-days-' + days);
   if (pill) pill.classList.add('active');
-  refreshInbox();
+  refreshInbox(true);
 }
 
 // Reset every Inbox filter (reply-type pill, date range, search box) back to
@@ -828,10 +836,13 @@ function clearInboxFilters() {
   document.getElementById('pill-days-7')?.classList.add('active');
   const searchInput = document.getElementById('inbox-search-input');
   if (searchInput) searchInput.value = '';
-  refreshInbox();
+  refreshInbox(true);
 }
 
-async function refreshInbox() {
+// resetScroll: true for an explicit user filter/date change (jump the list
+// back to the top for the new view); false for the periodic background
+// refresh, which should never yank the list out from under someone mid-scroll.
+async function refreshInbox(resetScroll = false) {
   const list = document.getElementById('conv-list-items');
   if (list && !inboxData.length) list.innerHTML = '<div style="padding:40px;text-align:center"><div class="loader"></div></div>';
   inboxData = await apiJ(`/api/inbox?days=${inboxDays}`);
@@ -867,10 +878,10 @@ async function refreshInbox() {
   if (pillNo)     pillNo.textContent     = `❌ Objections (${noCount})`;
   if (pillOther)  pillOther.textContent  = `💬 Others (${otherCount})`;
 
-  renderConvList();
+  renderConvList(resetScroll);
 }
 
-function filterConvs(q) { inboxSearch = q.toLowerCase(); renderConvList(); }
+function filterConvs(q) { inboxSearch = q.toLowerCase(); renderConvList(true); }
 
 function computeIsUnread(c) {
   const lastRead = inboxReadTs[c.phone] || 0;
@@ -884,29 +895,10 @@ function computeIsUnread(c) {
   return c.messages.some(msg => msg.dir === 'in' && new Date(msg.ts) > new Date(lastRead));
 }
 
-function renderConvList() {
-  const el = document.getElementById('conv-list-items');
-  if (!el) return;
-
-  let list = inboxData;
-
-  // Apply active filter
-  if (inboxFilter === 'yes')        list = list.filter(c => c.replyType === 'yes');
-  else if (inboxFilter === 'no')    list = list.filter(c => c.replyType === 'no');
-  else if (inboxFilter === 'other') list = list.filter(c => c.hasReplied && c.replyType === 'other');
-  else if (inboxFilter === 'unread') list = list.filter(c => c.isUnread);
-
-  // Apply search
-  if (inboxSearch) list = list.filter(c =>
-    c.phone.includes(inboxSearch) || c.preview.toLowerCase().includes(inboxSearch)
-  );
-
-  if (!list.length) { el.innerHTML = '<div class="conv-empty">No conversations found</div>'; return; }
-
-  el.innerHTML = list.map(c => {
-    const typeClass  = c.replyType === 'yes' ? 'badge-green' : c.replyType === 'no' ? 'badge-red' : 'badge-gray';
-    const unreadCls  = c.isUnread ? ' unread' : '';
-    return `<div class="conv-item${activeConv===c.phone?' active':''}${unreadCls}" onclick="openConv('${c.phone}')">
+function convRowHtml(c) {
+  const typeClass  = c.replyType === 'yes' ? 'badge-green' : c.replyType === 'no' ? 'badge-red' : 'badge-gray';
+  const unreadCls  = c.isUnread ? ' unread' : '';
+  return `<div class="conv-item${activeConv===c.phone?' active':''}${unreadCls}" onclick="openConv('${c.phone}')">
       <div class="conv-phone">
         ${c.name ? `<strong>${esc(c.name)}</strong> <span style="color:var(--muted);font-weight:400">${esc(c.phone)}</span>` : esc(c.phone)}
         ${c.hasReplied ? `<span class="badge ${typeClass}" style="font-size:10px;padding:2px 6px">${c.replyType||'reply'}</span>` : ''}
@@ -915,7 +907,92 @@ function renderConvList() {
       </div>
       <div class="conv-preview" style="${c.isUnread?'color:var(--text);font-weight:500':''}">${esc(c.preview)}</div>
     </div>`;
-  }).join('');
+}
+
+// Renders a single off-screen row to measure the real row height (font
+// rendering varies slightly by OS/zoom, so we measure rather than guess).
+function measureConvRowHeight(el) {
+  if (convRowHeight) return convRowHeight;
+  const probe = document.createElement('div');
+  probe.style.visibility = 'hidden';
+  probe.innerHTML = convRowHtml({ phone: '+10000000000', name: '', hasReplied: true, replyType: 'yes', isUnread: true, lastActivity: new Date().toISOString(), preview: 'Sample preview text for row height measurement' });
+  el.appendChild(probe.firstElementChild);
+  convRowHeight = el.lastElementChild.offsetHeight || 60;
+  el.lastElementChild.remove();
+  return convRowHeight;
+}
+
+// Filters inboxData down to the active filter/search — the cheap part, kept
+// separate from painting so scrolling never has to re-filter.
+function computeConvFilteredList() {
+  let list = inboxData;
+  if (inboxFilter === 'yes')        list = list.filter(c => c.replyType === 'yes');
+  else if (inboxFilter === 'no')    list = list.filter(c => c.replyType === 'no');
+  else if (inboxFilter === 'other') list = list.filter(c => c.hasReplied && c.replyType === 'other');
+  else if (inboxFilter === 'unread') list = list.filter(c => c.isUnread);
+  if (inboxSearch) list = list.filter(c =>
+    c.phone.includes(inboxSearch) || c.preview.toLowerCase().includes(inboxSearch)
+  );
+  return list;
+}
+
+// resetScroll: true when the filter/search/date-range itself just changed
+// (jump to top for the new view); false to keep wherever the user was
+// scrolled to (background data refresh, or re-render after opening a conv).
+function renderConvList(resetScroll = false) {
+  const el = document.getElementById('conv-list-items');
+  if (!el) return;
+  const prevScrollTop = el.scrollTop;
+
+  convFilteredList = computeConvFilteredList();
+
+  if (!convFilteredList.length) { el.innerHTML = '<div class="conv-empty">No conversations found</div>'; return; }
+
+  const rowHeight = measureConvRowHeight(el);
+  el.innerHTML = `<div id="conv-list-spacer" style="position:relative;height:${convFilteredList.length * rowHeight}px">
+    <div id="conv-list-rows" style="position:absolute;top:0;left:0;right:0"></div>
+  </div>`;
+
+  if (!convListScrollBound) {
+    el.addEventListener('scroll', () => renderVisibleConvRows(el));
+    convListScrollBound = true;
+  }
+  el.scrollTop = resetScroll ? 0 : prevScrollTop;
+  renderVisibleConvRows(el);
+}
+
+// Lighter-weight update for actions that only change a row's own state (e.g.
+// opening a conversation flips its unread flag/active highlight) — updates
+// the filtered list and repaints visible rows without rebuilding
+// #conv-list-items itself, so the list's scroll position is never disturbed.
+function refreshConvListInPlace() {
+  const el = document.getElementById('conv-list-items');
+  if (!el) return;
+  const spacer = document.getElementById('conv-list-spacer');
+  if (!spacer) { renderConvList(); return; }
+
+  convFilteredList = computeConvFilteredList();
+  if (!convFilteredList.length) { el.innerHTML = '<div class="conv-empty">No conversations found</div>'; return; }
+
+  const rowHeight = convRowHeight || measureConvRowHeight(el);
+  spacer.style.height = `${convFilteredList.length * rowHeight}px`;
+  renderVisibleConvRows(el);
+}
+
+// Paints only the rows currently in (plus a buffer above/below) the visible
+// scroll window, positioning the batch with a single `top` offset so the
+// rows inside it can stay in normal document flow.
+function renderVisibleConvRows(el) {
+  const rowsEl = document.getElementById('conv-list-rows');
+  if (!rowsEl) return;
+  const rowHeight = convRowHeight || measureConvRowHeight(el);
+  const buffer = 8;
+  const startIdx = Math.max(0, Math.floor(el.scrollTop / rowHeight) - buffer);
+  const visibleCount = Math.ceil(el.clientHeight / rowHeight) + buffer * 2;
+  const endIdx = Math.min(convFilteredList.length, startIdx + visibleCount);
+
+  rowsEl.style.top = `${startIdx * rowHeight}px`;
+  rowsEl.innerHTML = convFilteredList.slice(startIdx, endIdx).map(convRowHtml).join('');
 }
 
 function openConv(phone) {
@@ -926,7 +1003,7 @@ function openConv(phone) {
   // Update isUnread flag and re-render list
   const conv = inboxData.find(c => c.phone === phone);
   if (conv) conv.isUnread = false;
-  renderConvList();
+  refreshConvListInPlace();
   if (!conv) return;
 
   const panel = document.getElementById('thread-panel');
