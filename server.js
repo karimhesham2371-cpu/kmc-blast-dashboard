@@ -190,13 +190,13 @@ app.get('/api/campaigns', auth, async (req, res) => {
 });
 
 app.post('/api/campaigns', auth, async (req, res) => {
-  const { name, daily_limit, message, message_2, message_3, auto_reply_enabled, auto_reply_message, quiet_hours_enabled } = req.body;
+  const { name, daily_limit, message, message_2, message_3, auto_reply_enabled, auto_reply_message, quiet_hours_enabled, form_link } = req.body;
   if (!name || !message) return res.status(400).json({ error: 'name and message required' });
   const r = await sb.post('kmc_campaigns', {
     name, daily_limit: daily_limit || 200, message,
     message_2: message_2 || null, message_3: message_3 || null,
     auto_reply_enabled: !!auto_reply_enabled, auto_reply_message: auto_reply_message || null,
-    quiet_hours_enabled: !!quiet_hours_enabled,
+    quiet_hours_enabled: !!quiet_hours_enabled, form_link: form_link || null,
     status: 'draft', sent_today: 0, total_contacts: 0, last_sent_date: null,
     created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
   });
@@ -482,20 +482,36 @@ app.get('/api/inbox', auth, async (req, res) => {
   const inboundQs  = 'order=timestamp.desc' + (sinceISO ? `&timestamp=gte.${sinceISO}` : '');
   const outboundQs = 'order=sent_at.desc'   + (sinceISO ? `&sent_at=gte.${sinceISO}`   : '');
 
-  const [inbound, outbound, contacts, campaigns] = await Promise.all([
+  const [inbound, outbound] = await Promise.all([
     sb.getAll('kmc_replies',  inboundQs),
     sb.getAll('kmc_outbound', outboundQs),
-    sb.getAll('kmc_contacts', 'select=phone,first_name,campaign_id,flow_state,scheduled_call_time_utc,needs_human,needs_human_reason&order=created_at.desc'),
-    sb.get('kmc_campaigns','select=id,auto_reply_enabled,auto_reply_message'),
   ]);
 
-  // Build phone → { name, campaign } lookup (most recently-created contact record wins if a phone appears more than once)
-  const campById = {}; for (const c of campaigns) campById[c.id] = c;
+  // Only look up contacts for phones that actually appear in the messages we
+  // just fetched — pulling the ENTIRE kmc_contacts table (every lead ever
+  // uploaded across every campaign, paginated 1000 rows at a time) on every
+  // single Inbox load/poll was the real cause of the "have to wait ~a minute"
+  // slowness; that full-table fetch ignored the days filter entirely and grew
+  // with the size of the whole leads database, not the size of the Inbox view.
+  const phoneSet = new Set();
+  for (const r of inbound)  if (r.from) phoneSet.add(r.from);
+  for (const r of outbound) if (r.to)   phoneSet.add(r.to);
+  const phones = [...phoneSet];
+
+  const CHUNK = 200; // keep each PostgREST `in.()` filter URL a safe length
+  const chunks = [];
+  for (let i = 0; i < phones.length; i += CHUNK) chunks.push(phones.slice(i, i + CHUNK));
+  const contactChunks = await Promise.all(chunks.map(chunk =>
+    sb.getAll('kmc_contacts', `select=phone,first_name,campaign_id,flow_state,scheduled_call_time_utc,needs_human,needs_human_reason&phone=in.(${chunk.map(encodeURIComponent).join(',')})&order=created_at.desc`)
+  ));
+  const contacts = contactChunks.flat();
+
+  // Build phone → name lookup (most recently-created contact record wins if a phone appears more than once)
   const contactByPhone = {};
   for (const c of contacts) {
     if (!c.phone || contactByPhone[c.phone]) continue;
     contactByPhone[c.phone] = {
-      name: (c.first_name || '').trim(), campaign: campById[c.campaign_id] || null,
+      name: (c.first_name || '').trim(),
       flowState: c.flow_state || null, scheduledCallTimeUtc: c.scheduled_call_time_utc || null,
       needsHuman: !!c.needs_human, needsHumanReason: c.needs_human_reason || null,
     };
@@ -529,8 +545,6 @@ app.get('/api/inbox', auth, async (req, res) => {
     c.preview = c.messages.at(-1)?.text?.slice(0, 60) || '';
     const contact = contactByPhone[c.phone];
     c.name = contact?.name || '';
-    const camp = contact?.campaign;
-    c.autoReplyMessage = (camp?.auto_reply_enabled && camp.auto_reply_message) ? camp.auto_reply_message : null;
     c.flowState = contact?.flowState || null;
     c.scheduledCallTimeUtc = contact?.scheduledCallTimeUtc || null;
     c.needsHuman = contact?.needsHuman || false;
@@ -544,47 +558,40 @@ app.get('/api/inbox', auth, async (req, res) => {
 
 // Test send — preview any of the 3 variants (or auto-reply) to a single number, no contact/campaign side-effects
 app.post('/api/campaigns/:id/test-send', auth, async (req, res) => {
-  const { to, variant } = req.body; // variant: 1, 2, 3, or 'auto_reply'
+  const { to, variant } = req.body; // variant: 1, 2, or 3 — the message rotation variants only
   if (!to) return res.status(400).json({ error: 'to required' });
+  if (variant === 'auto_reply') return res.status(400).json({ error: 'Legacy auto-reply test-send has been removed — it was a source of wrong-campaign message mix-ups. Use the reply box in the Inbox for manual sends.' });
   const campaigns = await sb.get('kmc_campaigns', `id=eq.${req.params.id}`);
   const c = campaigns[0];
   if (!c) return res.status(404).json({ error: 'Not found' });
   const raw = to.replace(/\D/g, '');
   const phone = '+1' + raw.slice(-10);
   let template;
-  if (variant === 'auto_reply') template = c.auto_reply_message;
-  else if (variant == 2) template = c.message_2;
+  if (variant == 2) template = c.message_2;
   else if (variant == 3) template = c.message_3;
   else template = c.message;
   if (!template?.trim()) return res.status(400).json({ error: 'That variant is empty' });
   const text = template.replace(/\{name\}/gi, 'Test').replace(/\{address\}/gi, '123 Sample St');
   const r = await sendSMS(KMC_NUMBERS[0], phone, `[TEST] ${text}`);
+  console.log(`[TestSend] ${r.ok ? 'sent' : 'FAILED'} variant=${variant} — "${c.name}" → ${phone}`);
   res.json({ ok: r.ok, id: r.id, status: r.status, text });
 });
 
-// Manual send
-// `markAutoReplied` is sent by the frontend when the user used the "Use
-// Auto-Reply Message" quick-reply button — it tells us this manual send IS
-// the auto-reply for this contact, so we should flip contact.auto_replied to
-// true just like the webhook path does. Without this, a contact who was
-// manually sent their auto-reply (because the automatic webhook path failed
-// or was skipped) would still show auto_replied=false forever, and the
-// reconciliation job below would try to auto-send them a duplicate.
+// Manual send — used by the Inbox reply box. Always operator-typed text sent
+// to exactly the phone number shown on screen; no longer has any path that
+// pulls in a campaign's saved auto-reply text (that mechanism was removed
+// after it was found to occasionally attribute the wrong campaign's saved
+// text to a contact when the same phone existed in more than one campaign).
 app.post('/api/send', auth, async (req, res) => {
-  const { from, to, text, markAutoReplied } = req.body;
+  const { from, to, text } = req.body;
   if (!from || !to || !text) return res.status(400).json({ error: 'from, to, text required' });
   if (!KMC_SET.has(from))   return res.status(400).json({ error: 'Invalid from number' });
   const optOut = await sb.get('kmc_opt_outs', `phone=eq.${encodeURIComponent(to)}`);
   if (optOut.length) return res.status(400).json({ error: 'Number has opted out' });
   const r = await sendSMS(from, to, text);
+  console.log(`[Manual] ${r.ok ? 'sent' : 'FAILED'} ${from} → ${to} | "${text.slice(0, 60)}"`);
   if (r.ok) {
     await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'sent', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
-    if (markAutoReplied) {
-      try {
-        const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(to)}&order=created_at.desc&limit=1`);
-        if (contacts[0]) await sb.patch('kmc_contacts', `id=eq.${contacts[0].id}`, { auto_replied: true });
-      } catch (e) { console.error('[api/send] failed to mark auto_replied:', e.message); }
-    }
   }
   else await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
   res.json({ ok: r.ok, id: r.id, status: r.status, error: r.ok ? undefined : (r.errDetail || `Telnyx rejected the message (HTTP ${r.status})`) });
@@ -598,12 +605,14 @@ app.delete('/api/messages/:id', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Diagnostic: replay the exact lookup the auto-reply webhook does for a phone
-// number, so we can see WHY it did or didn't fire without touching the DB by
-// hand. Shows every kmc_contacts row for this phone (a phone can appear in
-// more than one campaign), which one the webhook's `limit=1` lookup would
-// actually pick (most recently created), and that record's campaign/auto-
-// reply/auto_replied state.
+// Diagnostic: replay the exact lookup advanceFlow() (the live YES-reply flow,
+// server.js's `sb.get('kmc_contacts', ...&order=created_at.desc&limit=1)`)
+// does for a phone number, without touching the DB by hand. Shows every
+// kmc_contacts row for this phone (a phone can appear in more than one
+// campaign), which one the flow's `limit=1` lookup would actually pick (most
+// recently created), and that record's campaign/auto_replied state. This is
+// the tool to use if a contact's messages look like they belong to the wrong
+// campaign — that always means the same phone has more than one contact row.
 app.get('/api/debug/auto-reply/:phone', auth, async (req, res) => {
   const phone = decodeURIComponent(req.params.phone);
   const contacts = await sb.getAll('kmc_contacts', `phone=eq.${encodeURIComponent(phone)}&order=created_at.desc`);

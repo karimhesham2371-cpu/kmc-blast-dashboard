@@ -518,8 +518,9 @@ async function renderCampDetail(id) {
           <div class="form-hint">Use {name} and {address} as placeholders. Filled variants rotate round-robin across contacts.</div>
         </div>
         <div class="form-row" style="border-top:1px solid var(--border);padding-top:14px">
-          <label class="form-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="edit-autoreply-en" ${c.auto_reply_enabled?'checked':''} style="width:auto"> Auto-reply when a contact says YES</label>
-          <textarea class="form-input" id="edit-autoreply-msg" rows="3" style="margin-top:8px">${esc(c.auto_reply_message||'')}</textarea>
+          <label class="form-label">Form Link <span style="color:var(--red)">*</span></label>
+          <input class="form-input" id="edit-form-link" value="${esc(c.form_link||'')}" placeholder="https://kmcashoffers.com/get-offer">
+          <div class="form-hint">Sent to the contact automatically once they confirm a callback time. Required for the automated YES → callback flow to complete — without it, matching contacts are flagged for manual follow-up instead.</div>
         </div>
         <div class="form-row">
           <label class="form-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="edit-quiet-en" ${c.quiet_hours_enabled?'checked':''} style="width:auto"> Respect quiet hours (9am–9pm)</label>
@@ -549,7 +550,6 @@ async function renderCampDetail(id) {
             <button class="btn btn-ghost btn-sm" onclick="testSend(${c.id},1)">Send Variant 1</button>
             ${c.message_2 ? `<button class="btn btn-ghost btn-sm" onclick="testSend(${c.id},2)">Send Variant 2</button>` : ''}
             ${c.message_3 ? `<button class="btn btn-ghost btn-sm" onclick="testSend(${c.id},3)">Send Variant 3</button>` : ''}
-            ${c.auto_reply_enabled ? `<button class="btn btn-ghost btn-sm" onclick="testSend(${c.id},'auto_reply')">Send Auto-Reply</button>` : ''}
           </div>
         </div>
       </div>
@@ -598,13 +598,13 @@ async function saveEdit(id) {
   const msg     = document.getElementById('edit-msg').value.trim();
   const msg2    = document.getElementById('edit-msg2').value.trim();
   const msg3    = document.getElementById('edit-msg3').value.trim();
-  const arEn    = document.getElementById('edit-autoreply-en').checked;
-  const arMsg   = document.getElementById('edit-autoreply-msg').value.trim();
   const quietEn = document.getElementById('edit-quiet-en').checked;
+  const formLink = document.getElementById('edit-form-link').value.trim();
   if (!name || !msg) { toast('Name and message required', 'error'); return; }
   await apiJ(`/api/campaigns/${id}`, { method:'PATCH', body: {
     name, daily_limit: limit, message: msg, message_2: msg2 || null, message_3: msg3 || null,
-    auto_reply_enabled: arEn, auto_reply_message: arMsg || null, quiet_hours_enabled: quietEn,
+    quiet_hours_enabled: quietEn,
+    form_link: formLink || null,
   }});
   toast('Saved ✓');
   renderCampDetail(id);
@@ -737,9 +737,9 @@ function showCreateModal() {
       <div class="form-hint" style="margin-top:-8px;margin-bottom:14px">Use {name} / {address} as placeholders. Contacts are rotated round-robin across whichever variants you fill in — this avoids spam-filter pattern detection from sending the exact same text to everyone.</div>
 
       <div class="form-row" style="border-top:1px solid var(--border);padding-top:14px">
-        <label class="form-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="new-autoreply-en" style="width:auto"> Auto-reply when a contact says YES / shows interest</label>
-        <textarea class="form-input" id="new-autoreply-msg" rows="3" placeholder="Awesome {name}! Someone from our team will call you shortly to go over the details on {address}." style="margin-top:8px"></textarea>
-        <div class="form-hint">Sent automatically, once per contact, from the same number that originally texted them.</div>
+        <label class="form-label">Form Link <span style="color:var(--red)">*</span></label>
+        <input class="form-input" id="new-form-link" placeholder="https://kmcashoffers.com/get-offer">
+        <div class="form-hint">Sent to the contact automatically once they confirm a callback time. Required for the automated YES → callback flow to complete — without it, matching contacts are flagged for manual follow-up instead.</div>
       </div>
 
       <div class="form-row">
@@ -761,13 +761,13 @@ async function createCamp() {
   const msg     = document.getElementById('new-msg').value.trim();
   const msg2    = document.getElementById('new-msg2').value.trim();
   const msg3    = document.getElementById('new-msg3').value.trim();
-  const arEn    = document.getElementById('new-autoreply-en').checked;
-  const arMsg   = document.getElementById('new-autoreply-msg').value.trim();
   const quietEn = document.getElementById('new-quiet-en').checked;
+  const formLink = document.getElementById('new-form-link').value.trim();
   if (!name || !msg) { toast('Name and at least one message variant required', 'error'); return; }
   const r = await apiJ('/api/campaigns', { method:'POST', body: {
     name, daily_limit: limit, message: msg, message_2: msg2 || null, message_3: msg3 || null,
-    auto_reply_enabled: arEn, auto_reply_message: arMsg || null, quiet_hours_enabled: quietEn,
+    quiet_hours_enabled: quietEn,
+    form_link: formLink || null,
   }});
   if (r.error) { toast(r.error, 'error'); return; }
   closeModal();
@@ -1037,15 +1037,14 @@ function openConv(phone) {
       }).join('')}
     </div>
     <div class="quick-replies" id="quick-replies" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 14px 8px">
-      <button class="btn btn-ghost btn-sm" onclick="useQuickReply('${esc(phone)}')">⚡ Use Auto-Reply Message${displayName?` for ${displayName}`:''}</button>
       <button class="btn btn-ghost btn-sm" onclick="useFollowUpReply('${esc(phone)}')">📋 Follow Up — Filled Form?${displayName?` (${displayName})`:''}</button>
-      <button class="btn btn-ghost btn-sm" onclick="diagnoseAutoReply('${esc(phone)}')">🔍 Diagnose Auto-Reply</button>
+      <button class="btn btn-ghost btn-sm" onclick="diagnoseAutoReply('${esc(phone)}')">🔍 Diagnose Contact/Campaign Match</button>
     </div>
     <div class="reply-bar">
       <select id="reply-from">
         ${KMC_NUMBERS.map(n => `<option value="${n}">${KMC_LABELS[n]||n}</option>`).join('')}
       </select>
-      <textarea id="reply-text" placeholder="Type a message..." rows="1" oninput="pendingIsAutoReplySend=false;this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply('${esc(phone)}')}"></textarea>
+      <textarea id="reply-text" placeholder="Type a message..." rows="1" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply('${esc(phone)}')}"></textarea>
       <button class="btn btn-primary" onclick="sendReply('${esc(phone)}')">Send</button>
     </div>
   `;
@@ -1074,19 +1073,8 @@ function openConvSend(phone) {
   }, 100);
 }
 
-// Generic fallback used if the contact's campaign doesn't have an auto-reply message configured
-const DEFAULT_QUICK_REPLY = "Awesome, {name}! Just fill out this quick form and we'll get you a cash offer fast, no obligation, no fees: https://kmcashoffers.com/get-offer Takes 2 minutes, talk soon!";
-
 // Follow-up for contacts who were already sent the auto-reply but haven't filled out the form yet
 const DEFAULT_FOLLOWUP_MESSAGE = "Hey {name}, just checking in — were you able to fill out the quick form? Once we get that, we can call you with a cash offer that fits your needs. Here's the link again if you need it: https://kmcashoffers.com/get-offer";
-
-// Tracks whether the text currently sitting in the reply box is the verbatim
-// auto-reply template (filled in via the "Use Auto-Reply Message" button) —
-// if so, sendReply() tells the backend to mark this contact's auto_replied
-// flag, so the reconciliation safety net won't try to auto-send them a
-// duplicate later. Any manual edit to the box, or using the Follow-Up
-// template instead, clears this back to false.
-let pendingIsAutoReplySend = false;
 
 // Small display-only line for the callback-scheduling flow state, per spec
 // Step 7 ("displaying flow_state and the scheduled call time on the
@@ -1119,46 +1107,36 @@ function fillReplyBox(text) {
   }
 }
 
-function useQuickReply(phone) {
-  const conv = inboxData.find(c => c.phone === phone);
-  const template = conv?.autoReplyMessage || DEFAULT_QUICK_REPLY;
-  const name = (conv?.name || '').trim();
-  fillReplyBox(template.replace(/\{name\}/gi, name || 'there'));
-  pendingIsAutoReplySend = true;
-}
-
 function useFollowUpReply(phone) {
   const conv = inboxData.find(c => c.phone === phone);
   const name = (conv?.name || '').trim();
   fillReplyBox(DEFAULT_FOLLOWUP_MESSAGE.replace(/\{name\}/gi, name || 'there'));
-  pendingIsAutoReplySend = false;
 }
 
-// Replays the exact contact/campaign lookup the auto-reply webhook performs
-// for this phone, and shows why it did or didn't fire — surfaces cases like
-// a phone existing under multiple campaigns (webhook only checks the most
-// recently created contact row), auto-reply toggled off, an empty auto-reply
-// message, or the contact already being marked auto_replied.
+// Replays the exact contact/campaign lookup advanceFlow() (the live YES-reply
+// flow) performs for this phone, and shows which campaign it would attribute
+// this contact to — surfaces cases like a phone existing under multiple
+// campaigns (the flow only ever looks at the most recently created contact
+// row for a phone, across ALL campaigns, so an older/duplicate contact row
+// can win and pull in a different campaign's form_link, sender number, etc).
 async function diagnoseAutoReply(phone) {
   const r = await apiJ(`/api/debug/auto-reply/${encodeURIComponent(phone)}`);
   if (!r || !r.records) { alert('Could not run diagnosis — see console for details.'); console.log(r); return; }
-  if (!r.records.length) { alert(`No kmc_contacts row found at all for ${phone} — the auto-reply webhook has nothing to look up, so it can't fire regardless of campaign settings.`); return; }
+  if (!r.records.length) { alert(`No kmc_contacts row found at all for ${phone} — the flow has nothing to look up.`); return; }
   const lines = r.records.map((rec, i) => {
-    const tag = rec.wouldBePickedByWebhook ? '➡️ WEBHOOK USES THIS ONE' : '(older duplicate, ignored by webhook)';
+    const tag = rec.wouldBePickedByWebhook ? '➡️ FLOW USES THIS ONE' : '(older duplicate, ignored by the flow)';
     return [
       `Record ${i + 1} ${tag}`,
       `  Campaign: ${rec.campaign_name || '(none)'} (id: ${rec.campaign_id || 'null'})`,
       `  Created: ${rec.created_at}`,
-      `  auto_reply_enabled: ${rec.auto_reply_enabled}`,
-      `  auto_reply_message set: ${!!rec.auto_reply_message_preview}${rec.auto_reply_message_preview ? ' — "' + rec.auto_reply_message_preview + '..."' : ''}`,
       `  auto_replied already sent: ${rec.auto_replied}`,
-      rec.blockedBecause.length ? `  ⚠️ BLOCKED: ${rec.blockedBecause.join('; ')}` : '  ✅ Nothing here would block an auto-reply',
+      rec.blockedBecause.length ? `  ⚠️ BLOCKED: ${rec.blockedBecause.join('; ')}` : '  ✅ Nothing here would block the flow',
     ].join('\n');
   });
   const inLines  = (r.inboundHistory  || []).map(m => `  [${m.type}] ${m.timestamp} — "${m.text}"`).join('\n') || '  (none)';
   const outLines = (r.outboundHistory || []).map(m => `  [${m.status}${m.campaign_id ? ' / camp ' + m.campaign_id : ''}] ${m.sent_at} — "${m.text}"`).join('\n') || '  (none)';
 
-  alert(`Auto-reply diagnosis for ${phone}\n(${r.totalContactRecords} contact record${r.totalContactRecords>1?'s':''} found)\n\n${lines.join('\n\n')}\n\nAll-time inbound history:\n${inLines}\n\nAll-time outbound history:\n${outLines}`);
+  alert(`Contact/campaign match for ${phone}\n(${r.totalContactRecords} contact record${r.totalContactRecords>1?'s':''} found)\n\n${lines.join('\n\n')}\n\nAll-time inbound history:\n${inLines}\n\nAll-time outbound history:\n${outLines}`);
 }
 
 async function sendReply(phone) {
@@ -1167,9 +1145,7 @@ async function sendReply(phone) {
   if (!from || !text) return;
   const btn = document.querySelector('.reply-bar .btn-primary');
   if (btn) btn.disabled = true;
-  const markAutoReplied = pendingIsAutoReplySend;
-  const r = await apiJ('/api/send', { method:'POST', body: { from, to: phone, text, markAutoReplied } });
-  pendingIsAutoReplySend = false;
+  const r = await apiJ('/api/send', { method:'POST', body: { from, to: phone, text } });
   if (r.ok) {
     toast('Sent ✓');
     document.getElementById('reply-text').value = '';
