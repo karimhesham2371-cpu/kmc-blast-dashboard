@@ -803,7 +803,31 @@ function formatTimeShort(date, tz, ref = new Date()) {
 async function advanceFlow(from, to, type, text) {
   try {
     const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(from)}&order=created_at.desc&limit=1`);
-    const contact = contacts[0];
+    let contact = contacts[0];
+
+    // No contact row found — this happens when a contact's campaign was deleted
+    // (which also deletes kmc_contacts rows) but they reply YES afterward.
+    // Rather than silently dropping their YES, auto-create a minimal orphan row
+    // so the flow can proceed: we know their phone, the KMC number they replied
+    // to (= `to`), and that they said YES. Address is unknown so Message A will
+    // say "your property" — good enough to keep the conversation alive.
+    if (!contact && type === 'yes') {
+      console.log(`[Flow] no contact row for ${from} — creating orphan row and sending Message A`);
+      const newRow = {
+        phone: from, first_name: '', address: '', campaign_id: null,
+        assigned_from: KMC_SET.has(to) ? to : null,
+        status: 'sent', flow_state: 'AWAITING_INTEREST',
+        lead_timezone: 'America/New_York',
+        created_at: new Date().toISOString(),
+      };
+      const created = await sb.post('kmc_contacts', newRow);
+      if (!created.ok) { console.log(`[Flow] skip ${from} — no contact row and failed to create orphan`); return; }
+      // Re-fetch the just-created row so we have its id
+      const refetch = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(from)}&order=created_at.desc&limit=1`);
+      contact = refetch[0];
+      if (!contact) { console.log(`[Flow] skip ${from} — orphan row created but refetch failed`); return; }
+    }
+
     if (!contact) { console.log(`[Flow] skip ${from} — no kmc_contacts row found`); return; }
     if (contact.flow_state === 'OPTED_OUT' || contact.status === 'opted_out') {
       console.log(`[Flow] skip ${from} — opted out`); return;
