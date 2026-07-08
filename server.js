@@ -21,8 +21,70 @@ const WH_TOKEN   = process.env.WH_TOKEN     || 'lm-sms-2026';
 const KMC_NUMBERS = ['+12109856004','+17869499467','+14709320125','+19163474799','+13126752435'];
 const KMC_SET     = new Set(KMC_NUMBERS);
 const STOP_RE     = /^(stop|unsubscribe|quit|cancel|end|remove me|opt.?out)[\s.!,]?$/i;
-const YES_RE      = /^(yes|y|yep|yeah|sure|interested|definitely|ok|okay|sounds good|let'?s go|sign me up)[\s.!,]?$/i;
-const NO_RE       = /^(no|nope|not interested|already sold|sold|never mind|nah|not selling)[\s.!,]?$/i;
+
+// ── Reply classifier ──────────────────────────────────────────────────────────
+// Replaces the old narrow YES_RE / NO_RE pair with a richer tiered function
+// that catches motivated-seller replies beyond plain "yes"/"no". Rules are
+// evaluated top-to-bottom; first match wins.
+//   'yes'   → interested — advance the callback-scheduling flow
+//   'no'    → not interested / already sold / hard objection
+//   'other' → unclear / hostile / unrelated — no flow action, human reviews
+// STOP_RE (true opt-out) is always tested BEFORE this function is called.
+function classifyReply(text) {
+  const t = (text || '').trim();
+  if (!t) return 'other';
+
+  // ── NOT INTERESTED — checked first so they override any sell-intent word ──
+  if (/^(no|nope|nah|never|not interested|not selling|never mind|nevermind|stop)[\s.!,?]*$/i.test(t)) return 'no';
+  if (/^(sold|it'?s sold|already sold)[\s.!,?🤌]*$/i.test(t)) return 'no';
+  if (/\b(already sold|no longer own|don'?t own|just sold|we sold|i sold|i('?ve| have) sold)\b/i.test(t)) return 'no';
+  if (/\b(it'?s|it is)\s+(been\s+)?sold\b|\bhas been sold\b|\bbeen sold\b/i.test(t)) return 'no';
+  if (/\bunder contract\b|has a contract on it/i.test(t)) return 'no';
+  if (/\b(changed my mind|not interested in sell|decided not to sell)\b/i.test(t)) return 'no';
+  if (/\bstop\b.{0,10}\bstop\b/i.test(t)) return 'no'; // "stop stop stop"
+
+  // ── INTERESTED ────────────────────────────────────────────────────────────
+  // 1. Exact short yes / agreement
+  if (/^(yes|y|yep|yeah|yea|sure|interested|definitely|absolutely|ok|okay|sounds good|let'?s go|sign me up|of course|anytime)[\s.!,?]*$/i.test(t)) return 'yes';
+
+  // 2. Explicit sell intent (multi-word phrases)
+  if (/\b(interested in sell|want to sell|looking to sell|open to sell|plan(ning)? to sell|going to sell|ready to sell|trying to sell|need(ing)? to sell|hop(e|ing) to sell|would (like|love) to sell|still.{0,20}sell|will be sold|would sell|we('?d| would) sell|i('?d| would) sell)\b/i.test(t)) return 'yes';
+
+  // 3. Bare "Selling" or starts with "Selling" ("Selling market price >")
+  if (/^selling\b/i.test(t) && !/\bnot selling\b/i.test(t)) return 'yes';
+
+  // 4. Yes-prefix + neutral body ("yes only for $200k", "yes how much", "yes, who is this?")
+  //    Negative guard catches "yes i already sold" etc. — those hit NOT INTERESTED above first.
+  if (/^(yes|yeah|yep|yea|sure)\b.{1,80}$/i.test(t) && !/\b(not|never|stop|already sold|no longer|contract|remove|wrong number)\b/i.test(t)) return 'yes';
+
+  // 5. Price anchor — contact quoted a price → signal they want to sell at that figure
+  if (/\$\s*\d[\d,.]*\s*[km]?/i.test(t)) return 'yes';  // $400K, $750,000, $200 k
+  if (/\b\d{3,4}[km]\b/i.test(t)) return 'yes';          // 215k, 400k, 500k, 395k
+  if (/\b\d{1,3}(,\d{3})+\b/.test(t)) return 'yes';      // 750,000 comma-formatted
+  if (/\b\d{6,}\b/.test(t)) return 'yes';                 // 750000 no-comma
+
+  // 6. Phone number in body → callback request ("call me direct 770-728-2596")
+  if (/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(t)) return 'yes';
+
+  // 7. Callback / availability signals
+  if (/\bcall me\b|\bcall us\b/i.test(t)) return 'yes';
+  if (/\byou can call\b/i.test(t)) return 'yes';
+  if (/\bcall in about\b|\bnow is good\b|\bnow works\b/i.test(t)) return 'yes';
+
+  // 8. Asking about the offer
+  if (/\bwhat.{0,15}(offer|buy|pay)\b/i.test(t)) return 'yes';
+  if (/\bdo you have.{0,10}offer\b/i.test(t)) return 'yes';
+  if (/\bhow much.{0,15}(buy|offer|pay|for it)\b/i.test(t)) return 'yes';
+
+  // 9. Timeline engagement with a question ("Next month... where are you located?")
+  if (/\b(next month|this month|next week|in \d+\s*(weeks?|months?|days?))\b/i.test(t) && /[?]/.test(t)) return 'yes';
+
+  // 10. Future / conditional interest
+  if (/\bnot ready at this time\b/i.test(t)) return 'yes';
+  if (/\bwould (like|want|consider).{0,20}sell\b/i.test(t)) return 'yes';
+
+  return 'other';
+}
 
 // ── Callback-scheduling flow: message templates (verbatim per spec) ───────────
 const MSG_A_TEMPLATE      = "Great! When's a good time to give you a quick call back about {PROPERTY_ADDRESS}?";
@@ -668,6 +730,49 @@ app.patch('/api/messages/:id/type', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Bulk re-classify all existing "other" replies using the current classifyReply()
+// logic. Defaults to dry-run (safe preview) — pass ?dry=false to commit.
+// Optional ?since=2026-07-01 to limit scope to a date range.
+// After a live run, the reconcile loop (runs every 10 min) will automatically
+// detect any newly-classified 'yes' contacts still stuck in AWAITING_INTEREST
+// and send them Message A — no extra action needed.
+app.post('/api/admin/reclassify-others', auth, async (req, res) => {
+  const dryRun = req.query.dry !== 'false';
+  const since  = req.query.since || null;
+
+  let qs = 'type=eq.other&order=timestamp.desc';
+  if (since) qs += `&timestamp=gte.${since}`;
+
+  const allOthers = await sb.getAll('kmc_replies', qs);
+
+  const toYes = [], toNo = [];
+  for (const reply of allOthers) {
+    const newType = classifyReply(reply.text);
+    if (newType === 'yes') toYes.push(reply);
+    else if (newType === 'no')  toNo.push(reply);
+  }
+
+  if (!dryRun) {
+    for (const r of toYes) await sb.patch('kmc_replies', `id=eq.${r.id}`, { type: 'yes' });
+    for (const r of toNo)  await sb.patch('kmc_replies', `id=eq.${r.id}`, { type: 'no'  });
+    console.log(`[Reclassify] committed: ${toYes.length} → yes, ${toNo.length} → no (of ${allOthers.length} others)`);
+  } else {
+    console.log(`[Reclassify] dry-run: would move ${toYes.length} → yes, ${toNo.length} → no (of ${allOthers.length} others)`);
+  }
+
+  res.json({
+    dryRun,
+    total_others:        allOthers.length,
+    reclassified_to_yes: toYes.length,
+    reclassified_to_no:  toNo.length,
+    unchanged:           allOthers.length - toYes.length - toNo.length,
+    ...(dryRun ? {
+      preview_yes: toYes.slice(0, 30).map(r => ({ id: r.id, from: r.from, text: r.text?.slice(0, 80) })),
+      preview_no:  toNo.slice(0,  30).map(r => ({ id: r.id, from: r.from, text: r.text?.slice(0, 80) })),
+    } : {}),
+  });
+});
+
 // Opt-outs
 app.get('/api/opt-outs', auth, async (req, res) => {
   res.json(await sb.getAll('kmc_opt_outs', 'order=created_at.desc'));
@@ -955,8 +1060,9 @@ app.post('/webhook/sms', async (req, res) => {
         sb.post('kmc_opt_outs', { phone: from, reason: 'STOP message', created_at: new Date().toISOString() }),
         sb.patch('kmc_contacts', `phone=eq.${encodeURIComponent(from)}`, { status: 'opted_out', flow_state: 'OPTED_OUT' }),
       ]);
-    } else if (NO_RE.test(text))  type = 'no';
-    else if (YES_RE.test(text)) type = 'yes';
+    } else {
+      type = classifyReply(text);
+    }
 
     await sb.post('kmc_replies', { from, to, text, type, timestamp: new Date().toISOString(), synced: false });
     console.log(`[Inbound] ${type.toUpperCase()} | ${from} → ${to} | "${text.slice(0, 60)}"`);
