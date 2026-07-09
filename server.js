@@ -778,35 +778,48 @@ app.post('/api/admin/unstick-callback', auth, async (req, res) => {
   res.json({ dryRun: false, eligible: eligible.length, sent, failed });
 });
 
-// Re-blast: reset previously-sent contacts back to pending so they get blasted
-// again with the new phone numbers. Only resets contacts still in
-// AWAITING_INTEREST (never replied YES, or replied NO/other) — anyone already
-// in the callback flow (AWAITING_CALLBACK_TIME, CALL_SCHEDULED) is left alone.
-// Also clears assigned_from so the new numbers get assigned on next blast.
-// Defaults to dry-run (?dry=false to commit). Optional ?campaign_id=N to scope
-// to a single campaign; omit to reset all campaigns.
+// Re-blast: reset contacts who NEVER replied back to pending so they get
+// blasted again with the new numbers. Includes both previously-sent AND
+// previously-failed contacts (new numbers may succeed where old ones failed).
+// Skips: anyone with ANY entry in kmc_replies (replied with anything),
+//        anyone in the callback flow (AWAITING_CALLBACK_TIME / CALL_SCHEDULED),
+//        opted-out numbers.
+// Also clears assigned_from so new numbers are assigned on next blast.
+// Defaults to dry-run (?dry=false to commit). Optional ?campaign_id=N to scope.
 app.post('/api/admin/reblast-setup', auth, async (req, res) => {
   const dryRun     = req.query.dry !== 'false';
   const campaignId = req.query.campaign_id ? parseInt(req.query.campaign_id) : null;
 
+  // Build set of phones that have replied with ANYTHING (yes/no/other)
+  const allReplies = await sb.getAll('kmc_replies', 'select=from');
+  const repliedPhones = new Set(allReplies.map(r => r.from).filter(Boolean));
+
   const optOuts = new Set((await sb.getAll('kmc_opt_outs', 'select=phone')).map(r => r.phone));
 
-  let contactsQs = 'status=eq.sent&select=id,phone,campaign_id,flow_state,first_name';
+  // Pull all contacts for the campaign (all statuses — includes failed ones)
+  let contactsQs = 'select=id,phone,campaign_id,flow_state,status';
   if (campaignId) contactsQs += `&campaign_id=eq.${campaignId}`;
-  const sentContacts = await sb.getAll('kmc_contacts', contactsQs);
+  else contactsQs += '&campaign_id=not.is.null';
+  const allContacts = await sb.getAll('kmc_contacts', contactsQs);
 
-  const eligible = sentContacts.filter(c =>
+  const IN_FLOW = new Set(['AWAITING_CALLBACK_TIME', 'CALL_SCHEDULED', 'OPTED_OUT']);
+
+  const eligible     = allContacts.filter(c =>
     !optOuts.has(c.phone) &&
-    (!c.flow_state || c.flow_state === 'AWAITING_INTEREST')
+    !repliedPhones.has(c.phone) &&
+    !IN_FLOW.has(c.flow_state) &&
+    c.status !== 'opted_out'
   );
-  const skippedFlow   = sentContacts.filter(c => c.flow_state && c.flow_state !== 'AWAITING_INTEREST');
-  const skippedOptOut = sentContacts.filter(c => optOuts.has(c.phone));
+  const skippedReplied  = allContacts.filter(c => repliedPhones.has(c.phone));
+  const skippedFlow     = allContacts.filter(c => IN_FLOW.has(c.flow_state));
+  const skippedOptOut   = allContacts.filter(c => optOuts.has(c.phone) || c.status === 'opted_out');
 
   if (dryRun) {
     return res.json({
       dryRun: true,
-      total_sent_contacts: sentContacts.length,
+      total_contacts:      allContacts.length,
       eligible_to_reblast: eligible.length,
+      skipped_replied:     skippedReplied.length,
       skipped_in_flow:     skippedFlow.length,
       skipped_opted_out:   skippedOptOut.length,
     });
@@ -822,7 +835,6 @@ app.post('/api/admin/reblast-setup', auth, async (req, res) => {
   }
 
   // Reset affected campaigns: clear sent_today + set status back to 'paused'
-  // so the Blast button reappears (completed campaigns hide it and block blasting).
   const campIds = [...new Set(eligible.map(c => c.campaign_id).filter(Boolean))];
   for (const id of campIds) {
     await sb.patch('kmc_campaigns', `id=eq.${id}`, {
@@ -833,10 +845,11 @@ app.post('/api/admin/reblast-setup', auth, async (req, res) => {
   console.log(`[ReblastSetup] reset ${eligible.length} contacts across ${campIds.length} campaigns`);
   res.json({
     dryRun: false,
-    reset_contacts:  eligible.length,
-    skipped_in_flow: skippedFlow.length,
+    reset_contacts:    eligible.length,
+    skipped_replied:   skippedReplied.length,
+    skipped_in_flow:   skippedFlow.length,
     skipped_opted_out: skippedOptOut.length,
-    campaigns_reset: campIds,
+    campaigns_reset:   campIds,
   });
 });
 
