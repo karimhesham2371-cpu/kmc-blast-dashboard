@@ -723,53 +723,60 @@ app.get('/api/debug/auto-reply/:phone', auth, async (req, res) => {
 });
 
 // Unstick contacts stuck in AWAITING_CALLBACK_TIME after form_link was missing.
-// Finds every contact in that state (who hasn't been flagged needs_human and has
-// a raw_time_text stored), re-runs advanceFlow() using their saved reply text so
-// Message B + form link get sent now that the campaign form_link is filled in.
+// raw_time_text column may not exist in Supabase, so we recover the callback
+// time text directly from kmc_replies: first inbound reply after the contact's
+// YES reply = their callback time. Re-runs advanceFlow() so Message B + form
+// link fires now that the campaign form_link is configured.
+// Skips contacts flagged 'unparseable_time_reply' (still need human review).
 // Defaults to dry-run (?dry=false to actually send).
 app.post('/api/admin/unstick-callback', auth, async (req, res) => {
   const dryRun = req.query.dry !== 'false';
 
-  // Target contacts in AWAITING_CALLBACK_TIME who have a raw_time_text stored.
-  // We include contacts flagged needs_human='missing_form_link' (now fixed) but
-  // skip those flagged 'unparseable_time_reply' (still need human attention).
   const stuck = await sb.getAll('kmc_contacts',
     'flow_state=eq.AWAITING_CALLBACK_TIME&order=created_at.desc'
   );
-  const eligible = stuck.filter(c =>
-    c.raw_time_text && c.raw_time_text.trim() &&
-    (!c.needs_human || c.needs_human_reason === 'missing_form_link')
-  );
+
+  // Skip contacts whose time was genuinely unparseable — those still need a human.
+  const candidates = stuck.filter(c => c.needs_human_reason !== 'unparseable_time_reply');
+
+  // For each candidate, recover their callback-time reply from kmc_replies:
+  // it's the first inbound message that arrived AFTER their YES reply.
+  const eligible = [];
+  for (const contact of candidates) {
+    const allReplies = await sb.get('kmc_replies',
+      `from=eq.${encodeURIComponent(contact.phone)}&order=timestamp.asc`
+    );
+    const yesIdx = allReplies.findIndex(r => r.type === 'yes');
+    const callbackReply = yesIdx >= 0 ? allReplies[yesIdx + 1] : allReplies[0];
+    if (!callbackReply?.text) continue;
+    eligible.push({ contact, callbackText: callbackReply.text, replyTo: callbackReply.to });
+  }
 
   if (dryRun) {
     return res.json({
       dryRun: true,
       total_stuck: stuck.length,
+      skipped_unparseable: stuck.length - candidates.length,
       eligible: eligible.length,
-      skipped_needs_human: stuck.length - eligible.length,
-      contacts: eligible.map(c => ({ phone: c.phone, name: c.first_name, raw_time_text: c.raw_time_text, campaign_id: c.campaign_id })),
+      contacts: eligible.map(({ contact, callbackText }) => ({
+        phone: contact.phone, name: contact.first_name,
+        callback_text: callbackText, campaign_id: contact.campaign_id,
+      })),
     });
   }
 
-  let sent = 0, failed = 0, skipped = 0;
-  for (const contact of eligible) {
-    // Pull the most recent inbound message from this contact so we have the
-    // `to` number (which KMC number they replied to) for advanceFlow().
-    const replies = await sb.get('kmc_replies', `from=eq.${encodeURIComponent(contact.phone)}&order=timestamp.desc&limit=1`);
-    const lastReply = replies[0];
-    if (!lastReply) { skipped++; continue; }
-
-    // Clear needs_human first so advanceFlow() doesn't hit any stale guard
+  let sent = 0, failed = 0;
+  for (const { contact, callbackText, replyTo } of eligible) {
+    // Clear stale needs_human flag before re-running flow
     await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: false, needs_human_reason: null });
-    await advanceFlow(contact.phone, lastReply.to, 'yes', contact.raw_time_text);
-    // Check if it advanced (flow_state changed to CALL_SCHEDULED)
+    await advanceFlow(contact.phone, replyTo, 'yes', callbackText);
     const check = await sb.get('kmc_contacts', `id=eq.${contact.id}`);
-    if (check[0]?.flow_state === 'CALL_SCHEDULED') sent++;
-    else { failed++; console.log(`[Unstick] did not advance for ${contact.phone} — may have no form_link or unparseable time`); }
+    if (check[0]?.flow_state === 'CALL_SCHEDULED') { sent++; }
+    else { failed++; console.log(`[Unstick] did not advance for ${contact.phone}`); }
   }
 
-  console.log(`[Unstick] done — sent:${sent} failed:${failed} skipped:${skipped}`);
-  res.json({ dryRun: false, eligible: eligible.length, sent, failed, skipped });
+  console.log(`[Unstick] done — sent:${sent} failed:${failed}`);
+  res.json({ dryRun: false, eligible: eligible.length, sent, failed });
 });
 
 // Re-blast: reset previously-sent contacts back to pending so they get blasted
