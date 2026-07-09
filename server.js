@@ -360,6 +360,17 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
   ]);
   const batch = []; let invalid = 0, dupes = 0, blocked = 0, crossCampaign = 0;
 
+  // Create the list record up front so every inserted contact is tagged with
+  // list_id — this lets us show "which CSVs are loaded" and delete a whole
+  // list in one operation without hunting by filename.
+  const listRow = await sb.post('kmc_contact_lists', {
+    campaign_id: parseInt(id),
+    filename: req.file.originalname || 'upload.csv',
+    total_contacts: 0, // updated to actual inserted count after the insert loop
+    created_at: new Date().toISOString(),
+  });
+  const listId = listRow.data?.[0]?.id || null;
+
   for (let i = 1; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
     const p   = parseCSVLine(lines[i]);
@@ -382,6 +393,7 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
       campaign_id: parseInt(id), phone,
       first_name: nameIdx >= 0 ? (p[nameIdx] || '').trim() : '',
       address: fullAddr, status: 'pending',
+      list_id: listId,
       created_at: new Date().toISOString(),
     });
   }
@@ -394,7 +406,55 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
 
   const total = (await sb.getAll('kmc_contacts', `campaign_id=eq.${id}&select=id`)).length;
   await sb.patch('kmc_campaigns', `id=eq.${id}`, { total_contacts: total, updated_at: new Date().toISOString() });
+  // Update the list record with the actual inserted count
+  if (listId) await sb.patch('kmc_contact_lists', `id=eq.${listId}`, { total_contacts: inserted });
   res.json({ inserted, dupes, blocked, invalid, crossCampaign, total_in_campaign: total });
+});
+
+// ── Contact Lists ─────────────────────────────────────────────────────────────
+// Each CSV upload creates one kmc_contact_lists record and tags every contact
+// row with that list_id. This lets the dashboard show which files are loaded,
+// how many contacts each contributed, and allows deleting a whole batch at once
+// without resetting opted-out or actively-flowing contacts.
+
+app.get('/api/campaigns/:id/lists', auth, async (req, res) => {
+  const lists = await sb.getAll('kmc_contact_lists', `campaign_id=eq.${req.params.id}&order=created_at.desc`);
+  res.json(lists);
+});
+
+app.delete('/api/campaigns/:id/lists/:listId', auth, async (req, res) => {
+  const { id, listId } = req.params;
+
+  // Pull contacts tagged to this specific list
+  const listContacts = await sb.getAll('kmc_contacts',
+    `list_id=eq.${listId}&campaign_id=eq.${id}&select=id,phone,status,flow_state`
+  );
+
+  // Preserve opted-out contacts (their kmc_opt_outs entry is the real guard,
+  // but keeping the row lets the UI show them as opted_out still) and anyone
+  // in an active conversation — deleting mid-flow would strand them.
+  const KEEP_FLOW = new Set(['AWAITING_CALLBACK_TIME', 'CALL_SCHEDULED']);
+  const toDelete = listContacts.filter(c =>
+    c.status !== 'opted_out' && !KEEP_FLOW.has(c.flow_state)
+  );
+  const skipped = listContacts.length - toDelete.length;
+
+  for (let i = 0; i < toDelete.length; i += 100) {
+    const chunk = toDelete.slice(i, i + 100);
+    await sb.del('kmc_contacts', `id=in.(${chunk.map(c => c.id).join(',')})`);
+  }
+
+  // Remove the list record itself
+  await sb.del('kmc_contact_lists', `id=eq.${listId}`);
+
+  // Sync campaign contact count
+  const remaining = await sb.getAll('kmc_contacts', `campaign_id=eq.${id}&select=id`);
+  await sb.patch('kmc_campaigns', `id=eq.${id}`, {
+    total_contacts: remaining.length, updated_at: new Date().toISOString(),
+  });
+
+  console.log(`[DeleteList] list ${listId} — deleted ${toDelete.length}, skipped ${skipped} (opted-out or in-flow)`);
+  res.json({ ok: true, deleted: toDelete.length, skipped, remaining: remaining.length });
 });
 
 app.get('/api/campaigns/:id/contacts', auth, async (req, res) => {

@@ -247,7 +247,7 @@ textarea.form-input{resize:vertical;min-height:100px;font-family:inherit}
         Manual Send
       </button>
     </div>
-    <div class="sidebar-footer">KMCashOffers · 5 numbers</div>
+    <div class="sidebar-footer">KMCashOffers · 6 numbers</div>
   </nav>
 
   <main class="main">
@@ -295,13 +295,14 @@ let inboxDays = 7; // date-range filter sent to /api/inbox: 1 | 7 | 30 | 0(=all 
 let convFilteredList = [];
 let convRowHeight = 0;
 let convListScrollBound = false;
-const KMC_NUMBERS = ['+12109856004','+17869499467','+14709320125','+19163474799','+13126752435'];
+const KMC_NUMBERS = ['+14702846015','+17862289189','+17866386625','+17866642007','+19168850241','+17262007337'];
 const KMC_LABELS  = {
-  '+12109856004': 'San Antonio TX',
-  '+17869499467': 'Miami FL',
-  '+14709320125': 'Atlanta GA',
-  '+19163474799': 'Sacramento CA',
-  '+13126752435': 'Chicago IL',
+  '+14702846015': '470-284-6015',
+  '+17862289189': '786-228-9189',
+  '+17866386625': '786-638-6625',
+  '+17866642007': '786-664-2007',
+  '+19168850241': '916-885-0241',
+  '+17262007337': '726-200-7337',
 };
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -557,6 +558,15 @@ async function renderCampDetail(id) {
       </div>
     </div>
 
+    <!-- Contact Lists -->
+    <div class="detail-section">
+      <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>📂 Uploaded Contact Lists</span>
+        <span style="font-size:12px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">Each CSV upload is tracked here — delete a list to remove those contacts from the campaign</span>
+      </div>
+      <div id="contact-lists-container"><div class="loader"></div></div>
+    </div>
+
     <!-- Contacts table -->
     <div class="detail-section">
       <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between">
@@ -573,6 +583,37 @@ async function renderCampDetail(id) {
     </div>
   `;
   loadContacts(id);
+  loadContactLists(id);
+}
+
+async function loadContactLists(id) {
+  const el = document.getElementById('contact-lists-container');
+  if (!el) return;
+  const lists = await apiJ(`/api/campaigns/${id}/lists`);
+  if (!lists.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:14px;padding:8px 0">No contact lists uploaded yet. Drop a CSV above to add one — it will appear here.</div>';
+    return;
+  }
+  el.innerHTML = `<table><thead><tr><th>Filename</th><th>Contacts Added</th><th>Uploaded</th><th></th></tr></thead><tbody>${
+    lists.map(l => {
+      const safeName = esc(l.filename).replace(/'/g, '&#39;');
+      return `<tr>
+        <td style="font-weight:600">📄 ${esc(l.filename)}</td>
+        <td>${(l.total_contacts||0).toLocaleString()}</td>
+        <td style="font-size:12px;color:var(--muted)">${fmtTs(l.created_at)}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="deleteList(${id},${l.id},'${safeName}',${l.total_contacts||0})">🗑 Delete List</button></td>
+      </tr>`;
+    }).join('')
+  }</tbody></table>`;
+}
+
+async function deleteList(campId, listId, filename, count) {
+  if (!confirm(`Delete contact list "${filename}"?\n\nThis will remove up to ${Number(count).toLocaleString()} contacts from the campaign.\n\n• Opted-out contacts are preserved (still blocked permanently)\n• Contacts with active callback conversations are preserved\n\nThis cannot be undone.`)) return;
+  const r = await apiJ(`/api/campaigns/${campId}/lists/${listId}`, { method:'DELETE' });
+  if (r.error) { toast(r.error, 'error'); return; }
+  const skippedNote = r.skipped > 0 ? ` (${r.skipped} preserved — opted-out or in-flow)` : '';
+  toast(`Removed ${r.deleted.toLocaleString()} contacts from "${filename}"${skippedNote} ✓`);
+  renderCampDetail(campId);
 }
 
 async function loadContacts(id) {
