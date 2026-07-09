@@ -488,9 +488,9 @@ async function renderCampDetail(id) {
     </div>
     ${c.quiet_hours_enabled ? `<div style="font-size:12px;color:var(--muted)">🕘 Quiet hours enabled — this campaign only sends between 9am–9pm server time</div>` : ''}
     <div class="camp-actions">
-      ${c.status==='active'    ? `<button class="btn btn-yellow" onclick="pauseCamp(${c.id},true)">⏸ Pause</button>` : ''}
-      ${c.status!=='active'&&c.status!=='completed' ? `<button class="btn btn-primary" onclick="activateCamp(${c.id},true)">▶ Activate</button>` : ''}
-      ${c.status!=='completed' ? `<button class="btn btn-blue" onclick="blastNow(${c.id})" id="blast-btn">⚡ Blast Now</button>` : ''}
+      ${c.status==='active' ? `<button class="btn btn-yellow" onclick="pauseCamp(${c.id},true)">⏸ Pause</button>` : ''}
+      ${c.status!=='active' && (c.status!=='completed' || stats.pending>0) ? `<button class="btn btn-primary" onclick="activateCamp(${c.id},true)">▶ Activate</button>` : ''}
+      ${c.status!=='completed' || stats.pending>0 ? `<button class="btn btn-blue" onclick="blastNow(${c.id})" id="blast-btn">⚡ Blast Now</button>` : ''}
       <button class="btn btn-ghost" onclick="renderCampDetail(${c.id})">↻ Refresh</button>
       <button class="btn btn-ghost" onclick="reblastSetup(${c.id})" style="background:#7c3aed;color:#fff;border-color:#7c3aed">🔄 Re-Blast Setup</button>
       <button class="btn btn-danger" onclick="deleteCamp(${c.id},'${esc(c.name)}')">🗑 Delete</button>

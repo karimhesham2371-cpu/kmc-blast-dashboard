@@ -410,7 +410,11 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
   }
 
   const total = (await sb.getAll('kmc_contacts', `campaign_id=eq.${id}&select=id`)).length;
-  await sb.patch('kmc_campaigns', `id=eq.${id}`, { total_contacts: total, updated_at: new Date().toISOString() });
+  // If the campaign was 'completed' and we just added new contacts, reset it to
+  // 'paused' so Activate / Blast Now buttons reappear automatically.
+  const campNow = await sb.get('kmc_campaigns', `id=eq.${id}&select=status`);
+  const resetStatus = inserted > 0 && campNow[0]?.status === 'completed' ? { status: 'paused' } : {};
+  await sb.patch('kmc_campaigns', `id=eq.${id}`, { total_contacts: total, ...resetStatus, updated_at: new Date().toISOString() });
   // Update the list record with the actual inserted count
   if (listId) await sb.patch('kmc_contact_lists', `id=eq.${listId}`, { total_contacts: inserted });
   res.json({ inserted, dupes, blocked, declined, invalid, crossCampaign, total_in_campaign: total });
