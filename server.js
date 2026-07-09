@@ -242,6 +242,7 @@ app.get('/api/stats', auth, async (req, res) => {
     total_replies:  replies.length,
     yes_replies:    replies.filter(r => r.type === 'yes').length,
     no_replies:     replies.filter(r => r.type === 'no').length,
+    other_replies:  replies.filter(r => r.type === 'other').length,
   });
 });
 

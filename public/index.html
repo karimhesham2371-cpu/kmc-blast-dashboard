@@ -409,6 +409,7 @@ async function renderOverview() {
     <div class="stat-card"><div class="stat-label">Total Replies</div><div class="stat-value blue">${s.total_replies.toLocaleString()}</div></div>
     <div class="stat-card"><div class="stat-label">YES Replies</div><div class="stat-value green">${s.yes_replies.toLocaleString()}</div></div>
     <div class="stat-card"><div class="stat-label">NO / Declined</div><div class="stat-value red">${s.no_replies.toLocaleString()}</div></div>
+    <div class="stat-card"><div class="stat-label">Others</div><div class="stat-value" style="color:#a78bfa">${(s.other_replies||0).toLocaleString()}</div></div>
     <div class="stat-card"><div class="stat-label">Campaigns</div><div class="stat-value">${s.campaigns}</div></div>
     <div class="stat-card"><div class="stat-label">Active</div><div class="stat-value green">${s.active}</div></div>
     <div class="stat-card"><div class="stat-label">Total Contacts</div><div class="stat-value">${s.total_contacts.toLocaleString()}</div></div>
