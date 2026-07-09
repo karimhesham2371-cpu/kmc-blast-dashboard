@@ -722,6 +722,52 @@ app.get('/api/debug/auto-reply/:phone', auth, async (req, res) => {
   });
 });
 
+// Unstick contacts stuck in AWAITING_CALLBACK_TIME after form_link was missing.
+// Finds every contact in that state (who hasn't been flagged needs_human and has
+// a raw_time_text stored), re-runs advanceFlow() using their saved reply text so
+// Message B + form link get sent now that the campaign form_link is filled in.
+// Defaults to dry-run (?dry=false to actually send).
+app.post('/api/admin/unstick-callback', auth, async (req, res) => {
+  const dryRun = req.query.dry !== 'false';
+
+  // Only target contacts who:
+  //  - are genuinely awaiting a callback time (not already handled)
+  //  - were NOT flagged needs_human (those had unparseable replies — skip them)
+  //  - have a raw_time_text stored (something to re-parse)
+  const stuck = await sb.getAll('kmc_contacts',
+    'flow_state=eq.AWAITING_CALLBACK_TIME&needs_human=is.false&order=created_at.desc'
+  );
+  const eligible = stuck.filter(c => c.raw_time_text && c.raw_time_text.trim());
+
+  if (dryRun) {
+    return res.json({
+      dryRun: true,
+      total_stuck: stuck.length,
+      eligible: eligible.length,
+      skipped_needs_human: stuck.length - eligible.length,
+      contacts: eligible.map(c => ({ phone: c.phone, name: c.first_name, raw_time_text: c.raw_time_text, campaign_id: c.campaign_id })),
+    });
+  }
+
+  let sent = 0, failed = 0, skipped = 0;
+  for (const contact of eligible) {
+    // Pull the most recent inbound message from this contact so we have the
+    // `to` number (which KMC number they replied to) for advanceFlow().
+    const replies = await sb.get('kmc_replies', `from=eq.${encodeURIComponent(contact.phone)}&order=timestamp.desc&limit=1`);
+    const lastReply = replies[0];
+    if (!lastReply) { skipped++; continue; }
+
+    await advanceFlow(contact.phone, lastReply.to, 'yes', contact.raw_time_text);
+    // Check if it advanced (flow_state changed to CALL_SCHEDULED)
+    const check = await sb.get('kmc_contacts', `id=eq.${contact.id}`);
+    if (check[0]?.flow_state === 'CALL_SCHEDULED') sent++;
+    else { failed++; console.log(`[Unstick] did not advance for ${contact.phone} — may have no form_link or unparseable time`); }
+  }
+
+  console.log(`[Unstick] done — sent:${sent} failed:${failed} skipped:${skipped}`);
+  res.json({ dryRun: false, eligible: eligible.length, sent, failed, skipped });
+});
+
 // Reclassify an inbound message type (yes / no / other)
 app.patch('/api/messages/:id/type', auth, async (req, res) => {
   const { type } = req.body;
