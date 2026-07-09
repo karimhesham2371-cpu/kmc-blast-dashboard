@@ -594,14 +594,17 @@ async function loadContactLists(id) {
     el.innerHTML = '<div style="color:var(--muted);font-size:14px;padding:8px 0">No contact lists uploaded yet. Drop a CSV above to add one — it will appear here.</div>';
     return;
   }
-  el.innerHTML = `<table><thead><tr><th>Filename</th><th>Contacts Added</th><th>Uploaded</th><th></th></tr></thead><tbody>${
+  el.innerHTML = `<table><thead><tr><th>Filename</th><th>Contacts</th><th>Uploaded</th><th></th></tr></thead><tbody>${
     lists.map(l => {
       const safeName = esc(l.filename).replace(/'/g, '&#39;');
+      const deleteBtn = l.legacy
+        ? `<button class="btn btn-danger btn-sm" onclick="deleteLegacyList(${id},'${safeName}',${l.total_contacts||0})">🗑 Delete</button>`
+        : `<button class="btn btn-danger btn-sm" onclick="deleteList(${id},${l.id},'${safeName}',${l.total_contacts||0})">🗑 Delete</button>`;
       return `<tr>
-        <td style="font-weight:600">📄 ${esc(l.filename)}</td>
+        <td style="font-weight:600">${l.legacy ? '📦' : '📄'} ${esc(l.filename)}</td>
         <td>${(l.total_contacts||0).toLocaleString()}</td>
-        <td style="font-size:12px;color:var(--muted)">${fmtTs(l.created_at)}</td>
-        <td><button class="btn btn-danger btn-sm" onclick="deleteList(${id},${l.id},'${safeName}',${l.total_contacts||0})">🗑 Delete List</button></td>
+        <td style="font-size:12px;color:var(--muted)">${l.created_at ? fmtTs(l.created_at) : '<span style="color:var(--muted)">before tracking</span>'}</td>
+        <td>${deleteBtn}</td>
       </tr>`;
     }).join('')
   }</tbody></table>`;
@@ -613,6 +616,15 @@ async function deleteList(campId, listId, filename, count) {
   if (r.error) { toast(r.error, 'error'); return; }
   const skippedNote = r.skipped > 0 ? ` (${r.skipped} preserved — opted-out or in-flow)` : '';
   toast(`Removed ${r.deleted.toLocaleString()} contacts from "${filename}"${skippedNote} ✓`);
+  renderCampDetail(campId);
+}
+
+async function deleteLegacyList(campId, filename, count) {
+  if (!confirm(`Delete all pre-tracking contacts?\n\nThese ${Number(count).toLocaleString()} contacts were uploaded before list tracking was added. Removing them will clear them from the campaign.\n\n• Opted-out contacts are preserved\n• Contacts with active callback conversations are preserved\n\nThis cannot be undone.`)) return;
+  const r = await apiJ(`/api/campaigns/${campId}/lists/legacy`, { method:'DELETE' });
+  if (r.error) { toast(r.error, 'error'); return; }
+  const skippedNote = r.skipped > 0 ? ` (${r.skipped} preserved)` : '';
+  toast(`Removed ${r.deleted.toLocaleString()} legacy contacts${skippedNote} ✓`);
   renderCampDetail(campId);
 }
 

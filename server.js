@@ -418,8 +418,18 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
 // without resetting opted-out or actively-flowing contacts.
 
 app.get('/api/campaigns/:id/lists', auth, async (req, res) => {
-  const lists = await sb.getAll('kmc_contact_lists', `campaign_id=eq.${req.params.id}&order=created_at.desc`);
-  res.json(lists);
+  const [lists, untagged] = await Promise.all([
+    sb.getAll('kmc_contact_lists', `campaign_id=eq.${req.params.id}&order=created_at.desc`),
+    sb.getAll('kmc_contacts', `campaign_id=eq.${req.params.id}&list_id=is.null&select=id`),
+  ]);
+  // Contacts uploaded before list-tracking was added have list_id=null and no
+  // kmc_contact_lists record. Surface them as a synthetic entry so they're
+  // visible and deletable from the UI, same as any tracked list.
+  const result = [...lists];
+  if (untagged.length > 0) {
+    result.push({ id: null, filename: '(contacts uploaded before list tracking)', total_contacts: untagged.length, created_at: null, legacy: true });
+  }
+  res.json(result);
 });
 
 app.delete('/api/campaigns/:id/lists/:listId', auth, async (req, res) => {
@@ -454,6 +464,25 @@ app.delete('/api/campaigns/:id/lists/:listId', auth, async (req, res) => {
   });
 
   console.log(`[DeleteList] list ${listId} — deleted ${toDelete.length}, skipped ${skipped} (opted-out or in-flow)`);
+  res.json({ ok: true, deleted: toDelete.length, skipped, remaining: remaining.length });
+});
+
+// Delete contacts that predate list-tracking (list_id IS NULL) for a campaign
+app.delete('/api/campaigns/:id/lists/legacy', auth, async (req, res) => {
+  const { id } = req.params;
+  const legacyContacts = await sb.getAll('kmc_contacts',
+    `campaign_id=eq.${id}&list_id=is.null&select=id,phone,status,flow_state`
+  );
+  const KEEP_FLOW = new Set(['AWAITING_CALLBACK_TIME', 'CALL_SCHEDULED']);
+  const toDelete = legacyContacts.filter(c => c.status !== 'opted_out' && !KEEP_FLOW.has(c.flow_state));
+  const skipped  = legacyContacts.length - toDelete.length;
+  for (let i = 0; i < toDelete.length; i += 100) {
+    const chunk = toDelete.slice(i, i + 100);
+    await sb.del('kmc_contacts', `id=in.(${chunk.map(c => c.id).join(',')})`);
+  }
+  const remaining = await sb.getAll('kmc_contacts', `campaign_id=eq.${id}&select=id`);
+  await sb.patch('kmc_campaigns', `id=eq.${id}`, { total_contacts: remaining.length, updated_at: new Date().toISOString() });
+  console.log(`[DeleteLegacy] campaign ${id} — deleted ${toDelete.length}, skipped ${skipped}`);
   res.json({ ok: true, deleted: toDelete.length, skipped, remaining: remaining.length });
 });
 
