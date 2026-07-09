@@ -730,14 +730,16 @@ app.get('/api/debug/auto-reply/:phone', auth, async (req, res) => {
 app.post('/api/admin/unstick-callback', auth, async (req, res) => {
   const dryRun = req.query.dry !== 'false';
 
-  // Only target contacts who:
-  //  - are genuinely awaiting a callback time (not already handled)
-  //  - were NOT flagged needs_human (those had unparseable replies — skip them)
-  //  - have a raw_time_text stored (something to re-parse)
+  // Target contacts in AWAITING_CALLBACK_TIME who have a raw_time_text stored.
+  // We include contacts flagged needs_human='missing_form_link' (now fixed) but
+  // skip those flagged 'unparseable_time_reply' (still need human attention).
   const stuck = await sb.getAll('kmc_contacts',
-    'flow_state=eq.AWAITING_CALLBACK_TIME&needs_human=is.false&order=created_at.desc'
+    'flow_state=eq.AWAITING_CALLBACK_TIME&order=created_at.desc'
   );
-  const eligible = stuck.filter(c => c.raw_time_text && c.raw_time_text.trim());
+  const eligible = stuck.filter(c =>
+    c.raw_time_text && c.raw_time_text.trim() &&
+    (!c.needs_human || c.needs_human_reason === 'missing_form_link')
+  );
 
   if (dryRun) {
     return res.json({
@@ -757,6 +759,8 @@ app.post('/api/admin/unstick-callback', auth, async (req, res) => {
     const lastReply = replies[0];
     if (!lastReply) { skipped++; continue; }
 
+    // Clear needs_human first so advanceFlow() doesn't hit any stale guard
+    await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: false, needs_human_reason: null });
     await advanceFlow(contact.phone, lastReply.to, 'yes', contact.raw_time_text);
     // Check if it advanced (flow_state changed to CALL_SCHEDULED)
     const check = await sb.get('kmc_contacts', `id=eq.${contact.id}`);
