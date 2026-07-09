@@ -227,9 +227,10 @@ function parseCSVLine(line) {
 // Stats
 app.get('/api/stats', auth, async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
-  const [campaigns, optOuts, replies, sentToday] = await Promise.all([
+  const [campaigns, optOuts, declines, replies, sentToday] = await Promise.all([
     sb.get('kmc_campaigns', 'select=id,status,total_contacts,sent_today'),
     sb.getAll('kmc_opt_outs',  'select=phone'),
+    sb.getAll('kmc_declines',  'select=phone'),
     sb.getAll('kmc_replies',   'select=type'),
     sb.getAll('kmc_outbound',  `select=id&sent_at=gte.${today}T00:00:00Z`),
   ]);
@@ -238,6 +239,7 @@ app.get('/api/stats', auth, async (req, res) => {
     active:         campaigns.filter(c => c.status === 'active').length,
     total_contacts: campaigns.reduce((a, c) => a + (c.total_contacts || 0), 0),
     opt_outs:       optOuts.length,
+    declines:       declines.length,
     sent_today:     sentToday.length,
     total_replies:  replies.length,
     yes_replies:    replies.filter(r => r.type === 'yes').length,
@@ -343,13 +345,15 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
 
   if (phoneIdx < 0 || phoneIdx === undefined) return res.status(400).json({ error: 'No phone column found in CSV — please map it manually' });
 
-  const [optOutRows, thisCampRows, otherCampRows, outboundRows] = await Promise.all([
+  const [optOutRows, declineRows, thisCampRows, otherCampRows, outboundRows] = await Promise.all([
     sb.getAll('kmc_opt_outs',  'select=phone'),
+    sb.getAll('kmc_declines',  'select=phone'),
     sb.getAll('kmc_contacts',  `campaign_id=eq.${id}&select=phone`),
     sb.getAll('kmc_contacts',  `campaign_id=neq.${id}&select=phone,status`),
     sb.getAll('kmc_outbound',  'select=to'),
   ]);
   const optOuts  = new Set(optOutRows.map(r => r.phone));
+  const declines = new Set(declineRows.map(r => r.phone));
   const existing = new Set(thisCampRows.map(r => r.phone));
   // Cross-campaign safety net: anyone already in another campaign (queued or already sent),
   // or with any outbound send history at all, gets skipped so we never double-text a lead
@@ -358,7 +362,7 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
     ...otherCampRows.map(r => r.phone),
     ...outboundRows.map(r => r.to),
   ]);
-  const batch = []; let invalid = 0, dupes = 0, blocked = 0, crossCampaign = 0;
+  const batch = []; let invalid = 0, dupes = 0, blocked = 0, declined = 0, crossCampaign = 0;
 
   // Create the list record up front so every inserted contact is tagged with
   // list_id — this lets us show "which CSVs are loaded" and delete a whole
@@ -378,6 +382,7 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
     if (raw.length < 10) { invalid++; continue; }
     const phone = '+1' + raw.slice(-10);
     if (optOuts.has(phone))         { blocked++; continue; }
+    if (declines.has(phone))        { declined++; continue; }
     if (existing.has(phone))        { dupes++; continue; }
     if (alreadyContacted.has(phone)){ crossCampaign++; continue; }
     existing.add(phone);
@@ -408,7 +413,7 @@ app.post('/api/campaigns/:id/upload', auth, upload.single('file'), async (req, r
   await sb.patch('kmc_campaigns', `id=eq.${id}`, { total_contacts: total, updated_at: new Date().toISOString() });
   // Update the list record with the actual inserted count
   if (listId) await sb.patch('kmc_contact_lists', `id=eq.${listId}`, { total_contacts: inserted });
-  res.json({ inserted, dupes, blocked, invalid, crossCampaign, total_in_campaign: total });
+  res.json({ inserted, dupes, blocked, declined, invalid, crossCampaign, total_in_campaign: total });
 });
 
 // ── Contact Lists ─────────────────────────────────────────────────────────────
@@ -1273,6 +1278,14 @@ app.post('/webhook/sms', async (req, res) => {
       ]);
     } else {
       type = classifyReply(text);
+      // Non-STOP objection / not-interested reply — log to kmc_declines so their
+      // number is permanently skipped on any future CSV upload, same as opt-outs.
+      // Uses ignore-duplicates so re-texting someone before they reply a second
+      // time won't throw; the UNIQUE constraint on phone handles dedup silently.
+      if (type === 'no') {
+        sb.post('kmc_declines', { phone: from, reason: text.slice(0, 200), created_at: new Date().toISOString() })
+          .catch(e => console.error('[Declines] insert failed:', e.message));
+      }
     }
 
     await sb.post('kmc_replies', { from, to, text, type, timestamp: new Date().toISOString(), synced: false });

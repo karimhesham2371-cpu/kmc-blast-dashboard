@@ -415,6 +415,7 @@ async function renderOverview() {
     <div class="stat-card"><div class="stat-label">Active</div><div class="stat-value green">${s.active}</div></div>
     <div class="stat-card"><div class="stat-label">Total Contacts</div><div class="stat-value">${s.total_contacts.toLocaleString()}</div></div>
     <div class="stat-card"><div class="stat-label">Opt-Outs</div><div class="stat-value red">${s.opt_outs.toLocaleString()}</div></div>
+    <div class="stat-card"><div class="stat-label">Declines (No/Objection)</div><div class="stat-value" style="color:#f97316">${(s.declines||0).toLocaleString()}</div></div>
   `;
 }
 
@@ -744,7 +745,7 @@ async function confirmUpload(id) {
   const r = await (await api(`/api/campaigns/${id}/upload`, { method:'POST', headers: { 'x-dash-token': TOKEN }, body: fd })).json();
   pendingUploadFile = null;
   if (r.error) { toast(r.error, 'error'); renderCampDetail(id); return; }
-  toast(`✅ ${r.inserted} added · ${r.dupes} dupes · ${r.blocked} opt-outs · ${r.crossCampaign||0} already texted elsewhere · ${r.invalid} invalid — total: ${r.total_in_campaign}`);
+  toast(`✅ ${r.inserted} added · ${r.dupes} dupes · ${r.blocked} opt-outs · ${r.declined||0} declined · ${r.crossCampaign||0} already texted · ${r.invalid} invalid — total: ${r.total_in_campaign}`);
   renderCampDetail(id);
 }
 
