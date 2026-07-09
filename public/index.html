@@ -489,6 +489,7 @@ async function renderCampDetail(id) {
       ${c.status!=='active'&&c.status!=='completed' ? `<button class="btn btn-primary" onclick="activateCamp(${c.id},true)">▶ Activate</button>` : ''}
       ${c.status!=='completed' ? `<button class="btn btn-blue" onclick="blastNow(${c.id})" id="blast-btn">⚡ Blast Now</button>` : ''}
       <button class="btn btn-ghost" onclick="renderCampDetail(${c.id})">↻ Refresh</button>
+      <button class="btn btn-ghost" onclick="reblastSetup(${c.id})" style="background:#7c3aed;color:#fff;border-color:#7c3aed">🔄 Re-Blast Setup</button>
       <button class="btn btn-danger" onclick="deleteCamp(${c.id},'${esc(c.name)}')">🗑 Delete</button>
     </div>
 
@@ -690,6 +691,18 @@ async function confirmUpload(id) {
   pendingUploadFile = null;
   if (r.error) { toast(r.error, 'error'); renderCampDetail(id); return; }
   toast(`✅ ${r.inserted} added · ${r.dupes} dupes · ${r.blocked} opt-outs · ${r.crossCampaign||0} already texted elsewhere · ${r.invalid} invalid — total: ${r.total_in_campaign}`);
+  renderCampDetail(id);
+}
+
+async function reblastSetup(id) {
+  // Dry run first to show the user what will be reset
+  const dry = await apiJ(`/api/admin/reblast-setup?campaign_id=${id}`, { method:'POST' });
+  if (dry.error) { toast(dry.error, 'error'); return; }
+  const msg = `Re-Blast Setup — Campaign ${id}\n\nThis will reset contacts who never replied so they can be blasted again with the current numbers.\n\n✅ Eligible to re-blast: ${dry.eligible_to_reblast}\n💬 Skipped (already replied): ${dry.skipped_replied}\n🔄 Skipped (in callback flow): ${dry.skipped_in_flow}\n🚫 Skipped (opted out): ${dry.skipped_opted_out}\n\nProceed?`;
+  if (!confirm(msg)) return;
+  const r = await apiJ(`/api/admin/reblast-setup?campaign_id=${id}&dry=false`, { method:'POST' });
+  if (r.error) { toast(r.error, 'error'); return; }
+  toast(`Re-Blast Setup done — ${r.reset_contacts} contacts reset to pending ✓`);
   renderCampDetail(id);
 }
 
