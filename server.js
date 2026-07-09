@@ -88,15 +88,14 @@ function classifyReply(text) {
 
 // ── Callback-scheduling flow: message templates (verbatim per spec) ───────────
 const MSG_A_TEMPLATE      = "Great! When's a good time to give you a quick call back about {PROPERTY_ADDRESS}?";
-const MSG_B_TEMPLATE      = "Perfect, {TIME_ECHO} works 👍 One thing before I call — so I can bring you an actual number instead of wasting your time with 20 questions, mind filling this quick property form? Takes 2 min: {FORM_LINK}. Talk at {TIME_SHORT}!";
+const MSG_B_TEMPLATE      = "Perfect, {TIME_ECHO} works 👍 One thing before I call, so I can bring you an actual number instead of wasting your time with 20 questions, mind filling this quick property form? Takes 2 min: {FORM_LINK}. Talk at {TIME_SHORT}!";
 const MSG_B_VAGUE_SUFFIX  = "Talk then!";
-const MSG_B_NOW_TEMPLATE  = "On it — calling you in a few minutes 👍 If you get 30 seconds first, this quick form helps me bring you an actual number: {FORM_LINK}";
 // The optional 4h nudge for AWAITING_CALLBACK_TIME (Step 5.6) — default OFF.
 // Flip to true if you want it live; it will never send more than once per
 // contact (checked against kmc_outbound history for this exact text).
 const NUDGE_ENABLED       = false;
 const NUDGE_DELAY_MS      = 4 * 60 * 60 * 1000;
-const NUDGE_TEXT          = "No rush — just let me know a good time and I'll call you then 👍";
+const NUDGE_TEXT          = "No rush, just let me know a good time and I'll call you then 👍";
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
 function sbReq(method, table, body, qs, range) {
@@ -1110,19 +1109,9 @@ async function advanceFlow(from, to, type, text) {
 
       const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
 
-      if (parsed.kind === 'now') {
-        const msg = MSG_B_NOW_TEMPLATE.replace(/\{FORM_LINK\}/g, formLink);
-        const r = await sendSMS(replyFrom, from, msg);
-        await Promise.all([
-          sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-          sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
-            flow_state: 'CALL_SCHEDULED', scheduled_call_time_utc: new Date().toISOString(),
-            raw_time_text: text, form_link_sent_at: new Date().toISOString(),
-          }),
-        ]);
-        console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} Message B (now) → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
-        return;
-      }
+      // 'now' is treated as vague ("Now works, talk then!") — no separate
+      // now-variant since the MSG_B_NOW_TEMPLATE has been removed per spec.
+      if (parsed.kind === 'now') parsed.kind = 'vague';
 
       // 'specific' or 'vague' — both send Message B with the form link, just
       // with different closing lines.
