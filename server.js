@@ -822,11 +822,12 @@ app.post('/api/admin/reblast-setup', auth, async (req, res) => {
     });
   }
 
-  // Reset sent_today on affected campaigns so daily cap starts fresh
+  // Reset affected campaigns: clear sent_today + set status back to 'paused'
+  // so the Blast button reappears (completed campaigns hide it and block blasting).
   const campIds = [...new Set(eligible.map(c => c.campaign_id).filter(Boolean))];
   for (const id of campIds) {
     await sb.patch('kmc_campaigns', `id=eq.${id}`, {
-      sent_today: 0, last_sent_date: null, updated_at: new Date().toISOString(),
+      status: 'paused', sent_today: 0, last_sent_date: null, updated_at: new Date().toISOString(),
     });
   }
 
