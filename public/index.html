@@ -1091,6 +1091,7 @@ function openConv(phone) {
       }).join('')}
     </div>
     <div class="quick-replies" id="quick-replies" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 14px 8px">
+      <button class="btn btn-ghost btn-sm" onclick="useCallbackTimeReply('${esc(phone)}')">☎️ Ask Best Callback Time</button>
       <button class="btn btn-ghost btn-sm" onclick="useFollowUpReply('${esc(phone)}')">📋 Follow Up — Filled Form?${displayName?` (${displayName})`:''}</button>
       <button class="btn btn-ghost btn-sm" onclick="diagnoseAutoReply('${esc(phone)}')">🔍 Diagnose Contact/Campaign Match</button>
     </div>
@@ -1165,6 +1166,14 @@ function useFollowUpReply(phone) {
   const conv = inboxData.find(c => c.phone === phone);
   const name = (conv?.name || '').trim();
   fillReplyBox(DEFAULT_FOLLOWUP_MESSAGE.replace(/\{name\}/gi, name || 'there'));
+}
+
+// Fills the reply box with the Message A callback-time-ask text (same wording
+// the live flow sends when a lead replies YES). Manual button for leads whose
+// YES got stuck without a response. Uses "your property" as the address
+// fallback (matching server.js), since /api/inbox doesn't return the address.
+function useCallbackTimeReply(phone) {
+  fillReplyBox("Great! When's a good time to give you a quick call back about your property?");
 }
 
 // Replays the exact contact/campaign lookup advanceFlow() (the live YES-reply
