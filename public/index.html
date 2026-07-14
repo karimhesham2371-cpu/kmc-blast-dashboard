@@ -1207,15 +1207,24 @@ async function sendReply(phone) {
   const text = document.getElementById('reply-text')?.value.trim();
   if (!from || !text) return;
   const btn = document.querySelector('.reply-bar .btn-primary');
-  if (btn) btn.disabled = true;
-  const r = await apiJ('/api/send', { method:'POST', body: { from, to: phone, text } });
-  if (r.ok) {
-    toast('Sent ✓');
-    document.getElementById('reply-text').value = '';
-    await refreshInbox();
-    openConv(phone);
-  } else { toast(r.error || 'Send failed', 'error'); }
-  if (btn) btn.disabled = false;
+  const origLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const r = await apiJ('/api/send', { method:'POST', body: { from, to: phone, text } });
+    if (r.ok) {
+      toast('Sent ✓');
+      document.getElementById('reply-text').value = '';
+      await refreshInbox();
+      openConv(phone);
+    } else { toast(r.error || 'Send failed', 'error'); }
+  } catch (e) {
+    // Most common cause: Render cold-start returns a non-JSON 502 page while
+    // the instance wakes, so apiJ's res.json() throws. Don't leave the button
+    // stuck — tell the user to retry (the server is usually up within a minute).
+    toast('Server waking up or unreachable — wait a few seconds and hit Send again', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origLabel || 'Send'; }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
