@@ -90,6 +90,10 @@ function classifyReply(text) {
 const MSG_A_TEMPLATE      = "Great! When's a good time to give you a quick call back about {PROPERTY_ADDRESS}?";
 const MSG_B_TEMPLATE      = "Perfect, {TIME_ECHO} works 👍 One thing before I call, so I can bring you an actual number instead of wasting your time with 20 questions, mind filling this quick property form? Takes 2 min: {FORM_LINK}. Talk at {TIME_SHORT}!";
 const MSG_B_VAGUE_SUFFIX  = "Talk then!";
+// Human-feel delay before the auto-reply (Message A) fires after a YES, so it
+// doesn't look like an instant bot. The inbound reply is already logged to
+// kmc_replies immediately (webhook), so only the outbound Message A waits.
+const MSG_A_DELAY_MS      = 2 * 60 * 1000; // 120s
 // The optional 4h nudge for AWAITING_CALLBACK_TIME (Step 5.6) — default OFF.
 // Flip to true if you want it live; it will never send more than once per
 // contact (checked against kmc_outbound history for this exact text).
@@ -1181,6 +1185,10 @@ async function advanceFlow(from, to, type, text) {
 
       const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
       const msgA = MSG_A_TEMPLATE.replace(/\{PROPERTY_ADDRESS\}/g, contact.address || 'your property');
+      // Wait before replying so it feels human, not like an instant bot. Safe
+      // on Render: this fresh webhook request resets the 15-min idle-sleep timer,
+      // so a 2-min wait won't get cut short by the instance spinning down.
+      if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
       const r = await sendSMS(replyFrom, from, msgA);
       await Promise.all([
         sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: msgA, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
