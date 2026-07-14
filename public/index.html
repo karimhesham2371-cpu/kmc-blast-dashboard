@@ -130,7 +130,7 @@ textarea.form-input{resize:vertical;min-height:100px;font-family:inherit}
 .conv-search{padding:12px;border-bottom:1px solid var(--border)}
 .conv-search input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none}
 .conv-search input:focus{border-color:var(--green)}
-.conv-item{padding:14px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.conv-item{padding:14px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;content-visibility:auto;contain-intrinsic-size:0 66px}
 .conv-item:hover{background:var(--card2)}
 .conv-item.active{background:var(--green-dim);border-left:3px solid var(--green)}
 .conv-phone{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
@@ -288,13 +288,12 @@ let inboxFilter = 'all'; // all | yes | no | unread
 let inboxRefreshTimer = null;
 let inboxReadTs = {}; // phone → timestamp of last time we opened that conv
 let inboxDays = 7; // date-range filter sent to /api/inbox: 1 | 7 | 30 | 0(=all time)
-// Virtualized conv list — with 3000+ conversations, rendering every row into
-// the DOM at once is what causes the scroll/hover lag. Instead we keep the
-// filtered list in memory and only ever paint the rows currently in (plus a
-// small buffer around) the visible scroll window.
+// Conv list — with 3000+ conversations, forcing layout on every row is what
+// caused the scroll/hover lag. We now render every filtered row into the DOM
+// but rely on CSS `content-visibility:auto` (.conv-item) so the browser skips
+// laying out and painting rows that are off-screen — same perf win as manual
+// virtualization, but with an accurate scrollbar and every row reachable.
 let convFilteredList = [];
-let convRowHeight = 0;
-let convListScrollBound = false;
 const KMC_NUMBERS = ['+14702846015','+17862289189','+17866386625','+17866642007','+19168850241','+17262007337'];
 const KMC_LABELS  = {
   '+14702846015': '470-284-6015',
@@ -864,7 +863,8 @@ async function renderInbox() {
         <button class="filter-pill active" onclick="setInboxDays(7)"  id="pill-days-7">7 Days</button>
         <button class="filter-pill" onclick="setInboxDays(30)" id="pill-days-30">30 Days</button>
         <button class="filter-pill" onclick="setInboxDays(0)"  id="pill-days-0">All Time</button>
-        <button class="filter-pill" onclick="clearInboxFilters()" id="pill-clear" style="margin-left:auto;color:var(--muted)">✕ Clear Filters</button>
+        <button class="filter-pill" onclick="markAllReadInFilter()" id="pill-read-all" style="margin-left:auto">✓ Read All</button>
+        <button class="filter-pill" onclick="clearInboxFilters()" id="pill-clear" style="color:var(--muted)">✕ Clear Filters</button>
       </div>
       <div id="conv-list-items"><div style="padding:40px;text-align:center"><div class="loader"></div></div></div>
     </div>
@@ -881,6 +881,34 @@ function setInboxFilter(f) {
   const pill = document.getElementById('pill-' + f);
   if (pill) pill.classList.add('active');
   renderConvList(true);
+}
+
+// Marks every conversation in the CURRENT view as read — respects the active
+// reply-type filter (All/Unread/Interested/Objections/Others), the search box,
+// and the date range, because it operates on exactly the list the user is
+// looking at (computeConvFilteredList), not the whole inbox. e.g. on the
+// Objections filter it only touches 'no' conversations.
+function markAllReadInFilter() {
+  const list = computeConvFilteredList();
+  const nowTs = new Date().toISOString();
+  let marked = 0;
+  list.forEach(c => {
+    if (c.isUnread) marked++;
+    inboxReadTs[c.phone] = nowTs;   // same per-phone read stamp openConv() writes
+    c.isUnread = false;
+  });
+  localStorage.setItem('kmc_read_ts', JSON.stringify(inboxReadTs));
+
+  // Recompute the Unread pill + sidebar badge from the full dataset so they
+  // reflect whatever unread items remain OUTSIDE the current filter.
+  const unreadCount = inboxData.filter(c => c.isUnread).length;
+  const pillUnread = document.getElementById('pill-unread');
+  if (pillUnread) pillUnread.textContent = `🔵 Unread (${unreadCount})`;
+  const badge = document.getElementById('inbox-badge');
+  if (badge) { badge.textContent = unreadCount || inboxData.length; badge.style.display = inboxData.length > 0 ? '' : 'none'; }
+
+  renderConvList(false);
+  toast(marked ? `Marked ${marked} conversation${marked === 1 ? '' : 's'} as read ✓` : 'No unread conversations in this view');
 }
 
 function setInboxDays(days) {
@@ -977,19 +1005,6 @@ function convRowHtml(c) {
     </div>`;
 }
 
-// Renders a single off-screen row to measure the real row height (font
-// rendering varies slightly by OS/zoom, so we measure rather than guess).
-function measureConvRowHeight(el) {
-  if (convRowHeight) return convRowHeight;
-  const probe = document.createElement('div');
-  probe.style.visibility = 'hidden';
-  probe.innerHTML = convRowHtml({ phone: '+10000000000', name: '', hasReplied: true, replyType: 'yes', isUnread: true, lastActivity: new Date().toISOString(), preview: 'Sample preview text for row height measurement' });
-  el.appendChild(probe.firstElementChild);
-  convRowHeight = el.lastElementChild.offsetHeight || 60;
-  el.lastElementChild.remove();
-  return convRowHeight;
-}
-
 // Filters inboxData down to the active filter/search — the cheap part, kept
 // separate from painting so scrolling never has to re-filter.
 function computeConvFilteredList() {
@@ -1016,51 +1031,22 @@ function renderConvList(resetScroll = false) {
 
   if (!convFilteredList.length) { el.innerHTML = '<div class="conv-empty">No conversations found</div>'; return; }
 
-  const rowHeight = measureConvRowHeight(el);
-  el.innerHTML = `<div id="conv-list-spacer" style="position:relative;height:${convFilteredList.length * rowHeight}px">
-    <div id="conv-list-rows" style="position:absolute;top:0;left:0;right:0"></div>
-  </div>`;
-
-  if (!convListScrollBound) {
-    el.addEventListener('scroll', () => renderVisibleConvRows(el));
-    convListScrollBound = true;
-  }
+  // Render EVERY filtered row into the DOM and let the browser skip painting
+  // the off-screen ones via CSS `content-visibility:auto` (see .conv-item).
+  // This replaced a hand-rolled fixed-height virtual scroller that guessed row
+  // height — a wrong guess made the scroll area too short (cutting the list off
+  // at ~40 of 80) and left rows blank for a moment during fast scrolling.
+  // Native content-visibility gives the same perf win with an accurate
+  // scrollbar and every row reachable, with no height math to get wrong.
+  el.innerHTML = convFilteredList.map(convRowHtml).join('');
   el.scrollTop = resetScroll ? 0 : prevScrollTop;
-  renderVisibleConvRows(el);
 }
 
 // Lighter-weight update for actions that only change a row's own state (e.g.
-// opening a conversation flips its unread flag/active highlight) — updates
-// the filtered list and repaints visible rows without rebuilding
-// #conv-list-items itself, so the list's scroll position is never disturbed.
+// opening a conversation flips its unread flag/active highlight). Rebuilds the
+// rows but preserves the current scroll position, so the list never jumps.
 function refreshConvListInPlace() {
-  const el = document.getElementById('conv-list-items');
-  if (!el) return;
-  const spacer = document.getElementById('conv-list-spacer');
-  if (!spacer) { renderConvList(); return; }
-
-  convFilteredList = computeConvFilteredList();
-  if (!convFilteredList.length) { el.innerHTML = '<div class="conv-empty">No conversations found</div>'; return; }
-
-  const rowHeight = convRowHeight || measureConvRowHeight(el);
-  spacer.style.height = `${convFilteredList.length * rowHeight}px`;
-  renderVisibleConvRows(el);
-}
-
-// Paints only the rows currently in (plus a buffer above/below) the visible
-// scroll window, positioning the batch with a single `top` offset so the
-// rows inside it can stay in normal document flow.
-function renderVisibleConvRows(el) {
-  const rowsEl = document.getElementById('conv-list-rows');
-  if (!rowsEl) return;
-  const rowHeight = convRowHeight || measureConvRowHeight(el);
-  const buffer = 8;
-  const startIdx = Math.max(0, Math.floor(el.scrollTop / rowHeight) - buffer);
-  const visibleCount = Math.ceil(el.clientHeight / rowHeight) + buffer * 2;
-  const endIdx = Math.min(convFilteredList.length, startIdx + visibleCount);
-
-  rowsEl.style.top = `${startIdx * rowHeight}px`;
-  rowsEl.innerHTML = convFilteredList.slice(startIdx, endIdx).map(convRowHtml).join('');
+  renderConvList(false);
 }
 
 function openConv(phone) {
