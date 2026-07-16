@@ -1343,6 +1343,12 @@ function openConv(phone) {
       ${buyerTypeBadge(conv.buyerType)}
       <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="openConvSend('${esc(phone)}')">↗ Reply</button>
     </div>
+    ${conv.hasReplied ? `<div style="padding:7px 14px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border)">
+      <span style="font-size:12px;color:var(--muted);margin-right:2px">Tag:</span>
+      <button class="btn btn-sm ${conv.replyType==='yes'?'btn-primary':'btn-ghost'}" onclick="setConvTag('${esc(phone)}','yes')">✅ Interested</button>
+      <button class="btn btn-sm ${conv.replyType==='no'?'btn-primary':'btn-ghost'}" onclick="setConvTag('${esc(phone)}','no')">❌ Objection</button>
+      <button class="btn btn-sm ${conv.replyType==='other'?'btn-primary':'btn-ghost'}" onclick="setConvTag('${esc(phone)}','other')">💬 Other</button>
+    </div>` : ''}
     ${formatFlowStateLine(conv)}
     <div class="thread-messages" id="thread-msgs">
       ${conv.messages.map(m => {
@@ -1424,6 +1430,28 @@ function formatFlowStateLine(conv) {
   const label = labels[state] || state;
   const needsHumanTag = conv.needsHuman ? ` <span style="color:var(--red,#e5484d)">⚠️ needs review${conv.needsHumanReason ? ' — ' + esc(conv.needsHumanReason) : ''}</span>` : '';
   return `<div style="padding:6px 14px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--border,#2a2a35)">${label}${needsHumanTag}</div>`;
+}
+
+// Manually set a conversation's tag (Interested / Objection / Other) from the
+// chat header — one click. Reclassifies the most recent inbound message (which
+// is what drives the conversation's badge, the pill counts, and the filters),
+// updates the view in place, and does NOT trigger any auto-reply.
+async function setConvTag(phone, type) {
+  const conv = inboxData.find(c => c.phone === phone);
+  if (!conv) return;
+  const lastIn = [...conv.messages].reverse().find(m => m.dir === 'in' && m.id);
+  if (!lastIn) { toast('No incoming message to tag yet', 'error'); return; }
+  if (conv.replyType === type) return; // already this tag — no-op
+  const r = await apiJ(`/api/messages/${lastIn.id}/type`, { method: 'PATCH', body: { type } });
+  if (r && r.error) { toast(r.error, 'error'); return; }
+  // Update in place so the badge, counts and filters reflect it immediately.
+  lastIn.type = type;
+  conv.replyType = type;
+  conv.hasReplied = true;
+  updateInboxCounts();
+  renderConvList(false);
+  openConv(phone); // re-render header so the active tag button highlights
+  toast(`Tagged as ${type === 'yes' ? 'Interested ✅' : type === 'no' ? 'Objection ❌' : 'Other 💬'}`);
 }
 
 function fillReplyBox(text) {
