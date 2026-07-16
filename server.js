@@ -1397,6 +1397,19 @@ async function advanceFlow(from, to, type, text) {
       return;
     }
 
+    // ── AUTO-REPLIES ARE OPT-IN PER CAMPAIGN ────────────────────────────────
+    // Nothing is ever sent automatically unless the campaign has
+    // auto_reply_enabled = true. Otherwise every reply just lands in the Inbox
+    // for manual handling. Orphan contacts (no campaign) never auto-reply.
+    if (!contact.campaign_id) {
+      console.log(`[Flow] ${from} — no campaign on contact, no auto-reply (manual only)`); return;
+    }
+    const flowCampRows = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
+    const flowCamp = flowCampRows[0] || null;
+    if (!flowCamp || !flowCamp.auto_reply_enabled) {
+      console.log(`[Flow] ${from} — auto-replies disabled for campaign ${contact.campaign_id}, leaving for manual handling`); return;
+    }
+
     const tz = contact.lead_timezone || 'America/New_York';
 
     // ── AWAITING_INTEREST: what advances the flow depends on flow_type.
@@ -1405,15 +1418,9 @@ async function advanceFlow(from, to, type, text) {
     //                           their buyer type, tag them, then ask for email.
     // A 'no' never advances either flow; STOP is fully handled upstream.
     if (contact.flow_state === 'AWAITING_INTEREST' || !contact.flow_state) {
-      // 'no' is a decline for both flows — bail early before any campaign fetch
-      // (preserves the original callback behavior of ignoring non-YES replies).
+      // 'no' is a decline for both flows — never advances.
       if (type === 'no') return;
-      // For callback campaigns, only a YES advances — but we can't know the
-      // flow type without the campaign, so fetch it before gating 'other'.
-      if (!contact.campaign_id) { console.log(`[Flow] skip ${from} — contact ${contact.id} has no campaign_id`); return; }
-      const camps = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
-      const camp = camps[0];
-      if (!camp) { console.log(`[Flow] skip ${from} — campaign ${contact.campaign_id} not found`); return; }
+      const camp = flowCamp; // already fetched + auto_reply_enabled-gated above
 
       const replyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
 

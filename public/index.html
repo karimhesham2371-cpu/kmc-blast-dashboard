@@ -597,6 +597,10 @@ async function renderCampDetail(id) {
             <option value="email_capture" ${c.flow_type === 'email_capture' ? 'selected' : ''}>📧 Email capture — investors (YES → ask email → pitch email)</option>
           </select>
         </div>
+        <div class="form-row" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px">
+          <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0"><input type="checkbox" id="edit-autoreply-en" ${c.auto_reply_enabled ? 'checked' : ''} style="width:auto"> <strong>Enable automatic replies</strong></label>
+          <div class="form-hint">OFF = nothing is ever sent automatically; every reply just lands in the Inbox for you to answer manually. ON = the flow above runs using the messages below.</div>
+        </div>
         <div class="form-row">
           <label class="form-label">Sending Numbers</label>
           <div style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow-y:auto">${numberPickerHtml('edit', Array.isArray(c.numbers) && c.numbers.length ? c.numbers : KMC_NUMBERS, numbersUsedByOthers(c.id))}</div>
@@ -621,11 +625,11 @@ async function renderCampDetail(id) {
           <div class="form-hint">Sent to the contact automatically once they confirm a callback time. Required for the automated YES → callback flow to complete — without it, matching contacts are flagged for manual follow-up instead.</div>
         </div>
         <div id="edit-email-fields" style="border-top:1px solid var(--border);padding-top:14px;${c.flow_type === 'email_capture' ? '' : 'display:none'}">
-          <div class="form-row"><label class="form-label">Email Ask — Variant 1</label><textarea class="form-input" id="edit-email-ask" rows="2">${esc(c.flow_config?.email_ask?.[0] || EMAIL_ASK_DEFAULT_1)}</textarea></div>
-          <div class="form-row"><label class="form-label">Email Ask — Variant 2 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="edit-email-ask2" rows="2">${esc(c.flow_config?.email_ask?.[1] || EMAIL_ASK_DEFAULT_2)}</textarea></div>
-          <div class="form-hint" style="margin-top:-8px;margin-bottom:14px">Sent automatically when someone replies YES — asks for their email. Variants rotate per contact.</div>
-          <div class="form-row"><label class="form-label">Confirmation SMS <span style="color:var(--muted);font-weight:400">(after their email is captured)</span></label><textarea class="form-input" id="edit-email-done" rows="2">${esc(c.flow_config?.email_done || EMAIL_DONE_DEFAULT)}</textarea></div>
-          <div class="form-row"><label class="form-label">Pitch Email Webhook</label><input class="form-input" id="edit-email-webhook" value="${esc(c.flow_config?.email_webhook || EMAIL_WEBHOOK_DEFAULT)}"><div class="form-hint">Captured emails are POSTed here ({phone, email, name}) — the Apps Script sends the branded pitch email.</div></div>
+          <div class="form-row"><label class="form-label">Email Ask — Variant 1</label><textarea class="form-input" id="edit-email-ask" rows="2" placeholder="Default: ${esc(EMAIL_ASK_DEFAULT_1)}">${esc(c.flow_config?.email_ask?.[0] || '')}</textarea></div>
+          <div class="form-row"><label class="form-label">Email Ask — Variant 2 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="edit-email-ask2" rows="2" placeholder="Optional 2nd variant — leave blank for none">${esc(c.flow_config?.email_ask?.[1] || '')}</textarea></div>
+          <div class="form-hint" style="margin-top:-8px;margin-bottom:14px">Sent automatically when someone engages — asks for their email. Type your own here; <strong>leave blank to use the grey default</strong>. Variants rotate per contact.</div>
+          <div class="form-row"><label class="form-label">Confirmation SMS <span style="color:var(--muted);font-weight:400">(after their email is captured)</span></label><textarea class="form-input" id="edit-email-done" rows="2" placeholder="Default: ${esc(EMAIL_DONE_DEFAULT)}">${esc(c.flow_config?.email_done || '')}</textarea></div>
+          <div class="form-row"><label class="form-label">Pitch Email Webhook</label><input class="form-input" id="edit-email-webhook" placeholder="Default: ${esc(EMAIL_WEBHOOK_DEFAULT)}" value="${esc(c.flow_config?.email_webhook || '')}"><div class="form-hint">Captured emails are POSTed here ({phone, email, name}) — the Apps Script sends the branded pitch email. Blank = default.</div></div>
         </div>
         <div class="form-row">
           <label class="form-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="edit-quiet-en" ${c.quiet_hours_enabled?'checked':''} style="width:auto"> Respect quiet hours (9am–9pm)</label>
@@ -762,6 +766,7 @@ async function saveEdit(id) {
     name, daily_limit: limit, message: msg, message_2: msg2 || null, message_3: msg3 || null,
     quiet_hours_enabled: quietEn,
     form_link: formLink || null,
+    auto_reply_enabled: document.getElementById('edit-autoreply-en')?.checked || false,
     ...readFlowFields('edit'),
   }});
   if (r.error) { toast(r.error, 'error'); return; }
@@ -915,6 +920,11 @@ async function showCreateModal() {
         <div class="form-hint">What happens automatically when someone replies YES to the first message.</div>
       </div>
 
+      <div class="form-row" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0"><input type="checkbox" id="new-autoreply-en" style="width:auto"> <strong>Enable automatic replies</strong></label>
+        <div class="form-hint">OFF (default) = nothing is sent automatically; replies land in the Inbox for manual handling. Turn ON only once you've set the reply messages below.</div>
+      </div>
+
       <div class="form-row">
         <label class="form-label">Sending Numbers</label>
         <div style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow-y:auto">${numberPickerHtml('new', [], usedMap)}</div>
@@ -933,11 +943,11 @@ async function showCreateModal() {
       </div>
 
       <div id="new-email-fields" style="display:none;border-top:1px solid var(--border);padding-top:14px">
-        <div class="form-row"><label class="form-label">Email Ask — Variant 1</label><textarea class="form-input" id="new-email-ask" rows="2">${esc(EMAIL_ASK_DEFAULT_1)}</textarea></div>
-        <div class="form-row"><label class="form-label">Email Ask — Variant 2 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="new-email-ask2" rows="2">${esc(EMAIL_ASK_DEFAULT_2)}</textarea></div>
-        <div class="form-hint" style="margin-top:-8px;margin-bottom:14px">Sent automatically when someone replies YES — asks for their email. Variants rotate per contact.</div>
-        <div class="form-row"><label class="form-label">Confirmation SMS <span style="color:var(--muted);font-weight:400">(after their email is captured)</span></label><textarea class="form-input" id="new-email-done" rows="2">${esc(EMAIL_DONE_DEFAULT)}</textarea></div>
-        <div class="form-row"><label class="form-label">Pitch Email Webhook</label><input class="form-input" id="new-email-webhook" value="${esc(EMAIL_WEBHOOK_DEFAULT)}"><div class="form-hint">When an email is captured it's POSTed here ({phone, email, name}) — the Google Apps Script sends the branded pitch email from team@leadmamba.com.</div></div>
+        <div class="form-row"><label class="form-label">Email Ask — Variant 1</label><textarea class="form-input" id="new-email-ask" rows="2" placeholder="Default: ${esc(EMAIL_ASK_DEFAULT_1)}"></textarea></div>
+        <div class="form-row"><label class="form-label">Email Ask — Variant 2 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="new-email-ask2" rows="2" placeholder="Optional 2nd variant — leave blank for none"></textarea></div>
+        <div class="form-hint" style="margin-top:-8px;margin-bottom:14px">Sent when someone engages (only if auto-replies are ON) — asks for their email. Type your own, or <strong>leave blank to use the grey default</strong>. Variants rotate per contact.</div>
+        <div class="form-row"><label class="form-label">Confirmation SMS <span style="color:var(--muted);font-weight:400">(after their email is captured)</span></label><textarea class="form-input" id="new-email-done" rows="2" placeholder="Default: ${esc(EMAIL_DONE_DEFAULT)}"></textarea></div>
+        <div class="form-row"><label class="form-label">Pitch Email Webhook</label><input class="form-input" id="new-email-webhook" placeholder="Default: ${esc(EMAIL_WEBHOOK_DEFAULT)}"><div class="form-hint">When an email is captured it's POSTed here ({phone, email, name}) — the Apps Script sends the branded pitch email. Blank = default.</div></div>
       </div>
 
       <div class="form-row">
@@ -995,6 +1005,7 @@ async function createCamp() {
     name, daily_limit: limit, message: msg, message_2: msg2 || null, message_3: msg3 || null,
     quiet_hours_enabled: quietEn,
     form_link: formLink || null,
+    auto_reply_enabled: document.getElementById('new-autoreply-en')?.checked || false,
     ...readFlowFields('new'),
   }});
   if (r.error) { toast(r.error, 'error'); return; }
