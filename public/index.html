@@ -247,7 +247,7 @@ textarea.form-input{resize:vertical;min-height:100px;font-family:inherit}
         Manual Send
       </button>
     </div>
-    <div class="sidebar-footer">KMCashOffers · 6 numbers</div>
+    <div class="sidebar-footer">KMC + LeadMamba · 26 numbers</div>
   </nav>
 
   <main class="main">
@@ -303,6 +303,56 @@ const KMC_LABELS  = {
   '+19168850241': '916-885-0241',
   '+17262007337': '726-200-7337',
 };
+// Full number registry — loaded from /api/numbers at login (single source of
+// truth lives in server.js). Initialized to the 6 KMC numbers as a fallback so
+// the UI still works if the fetch fails.
+let NUMBER_GROUPS = [{ group: 'KMC (sellers)', numbers: KMC_NUMBERS.map(n => ({ number: n, label: KMC_LABELS[n] })) }];
+let ALL_LABELS  = { ...KMC_LABELS };
+let ALL_NUMBERS = [...KMC_NUMBERS];
+async function loadNumbers() {
+  try {
+    const groups = await apiJ('/api/numbers');
+    if (Array.isArray(groups) && groups.length) {
+      NUMBER_GROUPS = groups;
+      ALL_NUMBERS = groups.flatMap(g => g.numbers.map(n => n.number));
+      ALL_LABELS = {};
+      groups.forEach(g => g.numbers.forEach(n => ALL_LABELS[n.number] = n.label));
+    }
+  } catch {}
+}
+function fromSelectOptionsHtml() {
+  return NUMBER_GROUPS.map(g =>
+    `<optgroup label="${esc(g.group)}">` +
+    g.numbers.map(n => `<option value="${n.number}">${esc(n.label)}</option>`).join('') +
+    `</optgroup>`
+  ).join('');
+}
+// Grouped checkbox grid for picking a campaign's sending numbers.
+function numberPickerHtml(prefix, selected) {
+  const sel = new Set(selected || []);
+  return NUMBER_GROUPS.map(g => `
+    <div style="margin-top:8px">
+      <div style="font-size:12px;color:var(--muted);font-weight:600;margin-bottom:4px">${esc(g.group)}
+        <a href="#" onclick="event.preventDefault();toggleNumGroup('${prefix}','${esc(g.group)}',true)" style="color:var(--green);font-weight:400;margin-left:8px">all</a>
+        <a href="#" onclick="event.preventDefault();toggleNumGroup('${prefix}','${esc(g.group)}',false)" style="color:var(--muted);font-weight:400;margin-left:4px">none</a>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px">
+        ${g.numbers.map(n => `<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;font-weight:400"><input type="checkbox" class="numpick-${prefix}" data-group="${esc(g.group)}" value="${n.number}" ${sel.has(n.number)?'checked':''} style="width:auto">${esc(n.label)}</label>`).join('')}
+      </div>
+    </div>`).join('');
+}
+function toggleNumGroup(prefix, group, on) {
+  document.querySelectorAll(`.numpick-${prefix}[data-group="${group}"]`).forEach(el => el.checked = on);
+}
+function pickedNumbers(prefix) {
+  return [...document.querySelectorAll(`.numpick-${prefix}:checked`)].map(el => el.value);
+}
+// Default email-capture copy shown pre-filled in the campaign forms (the
+// server has identical fallbacks if these are left blank).
+const EMAIL_ASK_DEFAULT_1 = "We're only working with a handful of investors right now — drop your email and I'll get you the info asap.";
+const EMAIL_ASK_DEFAULT_2 = "Perfect! I've got something I think you'll really like. What email can I reach you at?";
+const EMAIL_DONE_DEFAULT  = "Just sent it over 👍 Check your inbox (worth a peek at spam/promotions too). Any questions, just text me here.";
+const EMAIL_WEBHOOK_DEFAULT = 'https://script.google.com/macros/s/AKfycbxxmtnHLJq1JzeRGBtTMslWLnPqiBWmqsmGoLkUF7Cf5xymDC-oLcBnfV_qHK_vA5fc/exec';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 async function doLogin() {
@@ -374,7 +424,7 @@ function nav(view) {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-function init() { nav('overview'); }
+function init() { loadNumbers(); nav('overview'); }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtTime(ts) {
@@ -432,11 +482,12 @@ async function renderCampaigns() {
     document.getElementById('camp-table').innerHTML = `<div class="empty-state"><svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><p>No campaigns yet. Create your first one.</p></div>`;
     return;
   }
-  document.getElementById('camp-table').innerHTML = `<table><thead><tr><th>Campaign</th><th>Status</th><th>Contacts</th><th>Progress</th><th>Daily Limit</th><th>Actions</th></tr></thead><tbody>${
+  document.getElementById('camp-table').innerHTML = `<table><thead><tr><th>Campaign</th><th>Flow</th><th>Status</th><th>Contacts</th><th>Progress</th><th>Daily Limit</th><th>Actions</th></tr></thead><tbody>${
     camps.map(c => {
       const p = pct(c.total_contacts - (c.sent_today||0), c.total_contacts);
       return `<tr>
         <td><div style="font-weight:600;cursor:pointer;color:var(--green)" onclick="openCamp(${c.id})">${esc(c.name)}</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${fmtTime(c.created_at)}</div></td>
+        <td style="font-size:12px;white-space:nowrap">${c.flow_type === 'email_capture' ? '📧 Email capture' : '📞 Callback'}<div style="font-size:11px;color:var(--muted);margin-top:2px">${(Array.isArray(c.numbers) && c.numbers.length ? c.numbers.length : KMC_NUMBERS.length)} numbers</div></td>
         <td>${statusBadge(c.status)}</td>
         <td>${(c.total_contacts||0).toLocaleString()}</td>
         <td><div style="display:flex;align-items:center;gap:8px"><div class="progress-wrap" style="flex:1"><div class="progress-bar" style="width:${pct(c.sent_today||0,c.total_contacts||1)}%"></div></div><span style="font-size:12px;color:var(--muted)">${c.sent_today||0}/${c.total_contacts||0}</span></div></td>
@@ -470,7 +521,7 @@ async function renderCampDetail(id) {
     <div>
       <div class="back-btn" onclick="campDetail=null;renderCampaigns()">← Back to campaigns</div>
       <div class="view-header">
-        <div><div class="view-title">${esc(c.name)}</div><div class="view-sub">Campaign details & controls</div></div>
+        <div><div class="view-title">${esc(c.name)}</div><div class="view-sub">${c.flow_type === 'email_capture' ? '📧 Email capture flow' : '📞 Callback flow'} · ${(Array.isArray(c.numbers) && c.numbers.length ? c.numbers.length : KMC_NUMBERS.length)} sending numbers</div></div>
         ${statusBadge(c.status)}
       </div>
     </div>
@@ -508,6 +559,18 @@ async function renderCampDetail(id) {
           <input class="form-input" id="edit-limit" type="number" value="${c.daily_limit||200}">
         </div>
         <div class="form-row">
+          <label class="form-label">Auto-Reply Flow</label>
+          <select class="form-input" id="edit-flow" onchange="onFlowTypeChange('edit')">
+            <option value="callback" ${c.flow_type !== 'email_capture' ? 'selected' : ''}>📞 Callback scheduling — sellers (YES → ask callback time → form link)</option>
+            <option value="email_capture" ${c.flow_type === 'email_capture' ? 'selected' : ''}>📧 Email capture — investors (YES → ask email → pitch email)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label class="form-label">Sending Numbers</label>
+          <div style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow-y:auto">${numberPickerHtml('edit', Array.isArray(c.numbers) && c.numbers.length ? c.numbers : KMC_NUMBERS)}</div>
+          <div class="form-hint">Blasts and auto-replies use only these numbers. Unchecked = falls back to the 6 KMC numbers.</div>
+        </div>
+        <div class="form-row">
           <label class="form-label">First Message — Variant 1 <span style="color:var(--red)">*</span></label>
           <textarea class="form-input" id="edit-msg" rows="3">${esc(c.message||'')}</textarea>
         </div>
@@ -520,10 +583,17 @@ async function renderCampDetail(id) {
           <textarea class="form-input" id="edit-msg3" rows="3">${esc(c.message_3||'')}</textarea>
           <div class="form-hint">Use {name} and {address} as placeholders. Filled variants rotate round-robin across contacts.</div>
         </div>
-        <div class="form-row" style="border-top:1px solid var(--border);padding-top:14px">
+        <div class="form-row" id="edit-callback-fields" style="border-top:1px solid var(--border);padding-top:14px;${c.flow_type === 'email_capture' ? 'display:none' : ''}">
           <label class="form-label">Form Link <span style="color:var(--red)">*</span></label>
           <input class="form-input" id="edit-form-link" value="${esc(c.form_link||'')}" placeholder="https://kmcashoffers.com/get-offer">
           <div class="form-hint">Sent to the contact automatically once they confirm a callback time. Required for the automated YES → callback flow to complete — without it, matching contacts are flagged for manual follow-up instead.</div>
+        </div>
+        <div id="edit-email-fields" style="border-top:1px solid var(--border);padding-top:14px;${c.flow_type === 'email_capture' ? '' : 'display:none'}">
+          <div class="form-row"><label class="form-label">Email Ask — Variant 1</label><textarea class="form-input" id="edit-email-ask" rows="2">${esc(c.flow_config?.email_ask?.[0] || EMAIL_ASK_DEFAULT_1)}</textarea></div>
+          <div class="form-row"><label class="form-label">Email Ask — Variant 2 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="edit-email-ask2" rows="2">${esc(c.flow_config?.email_ask?.[1] || EMAIL_ASK_DEFAULT_2)}</textarea></div>
+          <div class="form-hint" style="margin-top:-8px;margin-bottom:14px">Sent automatically when someone replies YES — asks for their email. Variants rotate per contact.</div>
+          <div class="form-row"><label class="form-label">Confirmation SMS <span style="color:var(--muted);font-weight:400">(after their email is captured)</span></label><textarea class="form-input" id="edit-email-done" rows="2">${esc(c.flow_config?.email_done || EMAIL_DONE_DEFAULT)}</textarea></div>
+          <div class="form-row"><label class="form-label">Pitch Email Webhook</label><input class="form-input" id="edit-email-webhook" value="${esc(c.flow_config?.email_webhook || EMAIL_WEBHOOK_DEFAULT)}"><div class="form-hint">Captured emails are POSTed here ({phone, email, name}) — the Apps Script sends the branded pitch email.</div></div>
         </div>
         <div class="form-row">
           <label class="form-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="edit-quiet-en" ${c.quiet_hours_enabled?'checked':''} style="width:auto"> Respect quiet hours (9am–9pm)</label>
@@ -642,7 +712,7 @@ async function loadContacts(id) {
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.address)||'—'}</td>
       <td>${statusBadge(c.status)}</td>
       <td style="font-size:12px;color:var(--muted)">${c.sent_at ? fmtTs(c.sent_at) : '—'}</td>
-      <td style="font-size:12px;color:var(--muted)">${c.assigned_from ? KMC_LABELS[c.assigned_from]||c.assigned_from : '—'}</td>
+      <td style="font-size:12px;color:var(--muted)">${c.assigned_from ? ALL_LABELS[c.assigned_from]||c.assigned_from : '—'}</td>
     </tr>`).join('')
   }</tbody></table><div style="font-size:12px;color:var(--muted);padding:12px 0">Showing first 100. Use the filter to narrow down.</div>`;
 }
@@ -656,11 +726,13 @@ async function saveEdit(id) {
   const quietEn = document.getElementById('edit-quiet-en').checked;
   const formLink = document.getElementById('edit-form-link').value.trim();
   if (!name || !msg) { toast('Name and message required', 'error'); return; }
-  await apiJ(`/api/campaigns/${id}`, { method:'PATCH', body: {
+  const r = await apiJ(`/api/campaigns/${id}`, { method:'PATCH', body: {
     name, daily_limit: limit, message: msg, message_2: msg2 || null, message_3: msg3 || null,
     quiet_hours_enabled: quietEn,
     form_link: formLink || null,
+    ...readFlowFields('edit'),
   }});
+  if (r.error) { toast(r.error, 'error'); return; }
   toast('Saved ✓');
   renderCampDetail(id);
 }
@@ -798,15 +870,38 @@ function showCreateModal() {
       <div class="form-row"><label class="form-label">Campaign Name</label><input class="form-input" id="new-name" placeholder="e.g. June Tampa Blast"></div>
       <div class="form-row"><label class="form-label">Daily Sending Limit</label><input class="form-input" id="new-limit" type="number" value="200" min="1" max="2000"><div class="form-hint">Max messages to send per day for this campaign</div></div>
 
+      <div class="form-row">
+        <label class="form-label">Auto-Reply Flow</label>
+        <select class="form-input" id="new-flow" onchange="onFlowTypeChange('new')">
+          <option value="callback">📞 Callback scheduling — sellers (YES → ask callback time → form link)</option>
+          <option value="email_capture">📧 Email capture — investors (YES → ask email → pitch email)</option>
+        </select>
+        <div class="form-hint">What happens automatically when someone replies YES to the first message.</div>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">Sending Numbers</label>
+        <div style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow-y:auto">${numberPickerHtml('new', KMC_NUMBERS)}</div>
+        <div class="form-hint">The campaign blasts from (and auto-replies with) only these numbers, rotated round-robin. If none are checked, it falls back to the 6 KMC numbers.</div>
+      </div>
+
       <div class="form-row"><label class="form-label">First Message — Variant 1 <span style="color:var(--red)">*</span></label><textarea class="form-input" id="new-msg" rows="3" placeholder="Hey {name}, I came across your property at {address}..."></textarea></div>
       <div class="form-row"><label class="form-label">First Message — Variant 2 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="new-msg2" rows="3" placeholder="Leave blank to skip this variant"></textarea></div>
       <div class="form-row"><label class="form-label">First Message — Variant 3 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="new-msg3" rows="3" placeholder="Leave blank to skip this variant"></textarea></div>
       <div class="form-hint" style="margin-top:-8px;margin-bottom:14px">Use {name} / {address} as placeholders. Contacts are rotated round-robin across whichever variants you fill in — this avoids spam-filter pattern detection from sending the exact same text to everyone.</div>
 
-      <div class="form-row" style="border-top:1px solid var(--border);padding-top:14px">
+      <div class="form-row" id="new-callback-fields" style="border-top:1px solid var(--border);padding-top:14px">
         <label class="form-label">Form Link <span style="color:var(--red)">*</span></label>
         <input class="form-input" id="new-form-link" placeholder="https://kmcashoffers.com/get-offer">
         <div class="form-hint">Sent to the contact automatically once they confirm a callback time. Required for the automated YES → callback flow to complete — without it, matching contacts are flagged for manual follow-up instead.</div>
+      </div>
+
+      <div id="new-email-fields" style="display:none;border-top:1px solid var(--border);padding-top:14px">
+        <div class="form-row"><label class="form-label">Email Ask — Variant 1</label><textarea class="form-input" id="new-email-ask" rows="2">${esc(EMAIL_ASK_DEFAULT_1)}</textarea></div>
+        <div class="form-row"><label class="form-label">Email Ask — Variant 2 <span style="color:var(--muted);font-weight:400">(optional)</span></label><textarea class="form-input" id="new-email-ask2" rows="2">${esc(EMAIL_ASK_DEFAULT_2)}</textarea></div>
+        <div class="form-hint" style="margin-top:-8px;margin-bottom:14px">Sent automatically when someone replies YES — asks for their email. Variants rotate per contact.</div>
+        <div class="form-row"><label class="form-label">Confirmation SMS <span style="color:var(--muted);font-weight:400">(after their email is captured)</span></label><textarea class="form-input" id="new-email-done" rows="2">${esc(EMAIL_DONE_DEFAULT)}</textarea></div>
+        <div class="form-row"><label class="form-label">Pitch Email Webhook</label><input class="form-input" id="new-email-webhook" value="${esc(EMAIL_WEBHOOK_DEFAULT)}"><div class="form-hint">When an email is captured it's POSTed here ({phone, email, name}) — the Google Apps Script sends the branded pitch email from team@leadmamba.com.</div></div>
       </div>
 
       <div class="form-row">
@@ -822,6 +917,35 @@ function showCreateModal() {
 
 function closeModal() { document.getElementById('create-modal')?.remove(); }
 
+// Toggle which flow-specific fields are visible (create modal + edit panel
+// share this via their id prefix: 'new' / 'edit').
+function onFlowTypeChange(prefix) {
+  const flow = document.getElementById(`${prefix}-flow`)?.value;
+  const cb = document.getElementById(`${prefix}-callback-fields`);
+  const em = document.getElementById(`${prefix}-email-fields`);
+  if (cb) cb.style.display = flow === 'email_capture' ? 'none' : '';
+  if (em) em.style.display = flow === 'email_capture' ? '' : 'none';
+}
+
+// Read the flow_type / numbers / flow_config fields shared by create + edit.
+function readFlowFields(prefix) {
+  const flow_type = document.getElementById(`${prefix}-flow`)?.value || 'callback';
+  const picked = pickedNumbers(prefix);
+  let flow_config = null;
+  if (flow_type === 'email_capture') {
+    const ask1 = document.getElementById(`${prefix}-email-ask`)?.value.trim() || '';
+    const ask2 = document.getElementById(`${prefix}-email-ask2`)?.value.trim() || '';
+    const done = document.getElementById(`${prefix}-email-done`)?.value.trim() || '';
+    const hook = document.getElementById(`${prefix}-email-webhook`)?.value.trim() || '';
+    flow_config = {
+      email_ask: [ask1, ask2].filter(Boolean),
+      ...(done ? { email_done: done } : {}),
+      ...(hook ? { email_webhook: hook } : {}),
+    };
+  }
+  return { flow_type, numbers: picked.length ? picked : null, flow_config };
+}
+
 async function createCamp() {
   const name    = document.getElementById('new-name').value.trim();
   const limit   = parseInt(document.getElementById('new-limit').value) || 200;
@@ -835,6 +959,7 @@ async function createCamp() {
     name, daily_limit: limit, message: msg, message_2: msg2 || null, message_3: msg3 || null,
     quiet_hours_enabled: quietEn,
     form_link: formLink || null,
+    ...readFlowFields('new'),
   }});
   if (r.error) { toast(r.error, 'error'); return; }
   closeModal();
@@ -1078,7 +1203,7 @@ function openConv(phone) {
       ${conv.messages.map(m => {
         const out = m.dir === 'out';
         return `<div>
-          ${out ? `<div class="msg-from" style="text-align:right">${KMC_LABELS[m.from]||m.from||''}</div>` : ''}
+          ${out ? `<div class="msg-from" style="text-align:right">${ALL_LABELS[m.from]||m.from||''}</div>` : ''}
           <div class="msg ${out?'msg-out':'msg-in'}"
             data-id="${m.id||''}"
             data-dir="${m.dir}"
@@ -1097,7 +1222,7 @@ function openConv(phone) {
     </div>
     <div class="reply-bar">
       <select id="reply-from">
-        ${KMC_NUMBERS.map(n => `<option value="${n}">${KMC_LABELS[n]||n}</option>`).join('')}
+        ${fromSelectOptionsHtml()}
       </select>
       <textarea id="reply-text" placeholder="Type a message..." rows="1" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply('${esc(phone)}')}"></textarea>
       <button class="btn btn-primary" onclick="sendReply('${esc(phone)}')">Send</button>
@@ -1144,6 +1269,10 @@ function formatFlowStateLine(conv) {
     CALL_SCHEDULED: conv.scheduledCallTimeUtc
       ? `📞 Call scheduled — ${new Date(conv.scheduledCallTimeUtc).toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium', timeStyle: 'short' })} ET`
       : '📞 Call scheduled — anytime (no specific time given)',
+    AWAITING_EMAIL: '📧 Waiting for their email',
+    EMAIL_CAPTURED: conv.email
+      ? `✅ Email captured — <strong>${esc(conv.email)}</strong> (pitch email sent)`
+      : '✅ Email captured (pitch email sent)',
     OPTED_OUT: '🚫 Opted out',
     NEEDS_HUMAN: '⚠️ Needs human review',
   };
@@ -1292,7 +1421,7 @@ function renderSend() {
     <div class="form-row">
       <label class="form-label">From Number</label>
       <select class="form-input" id="send-from">
-        ${KMC_NUMBERS.map(n => `<option value="${n}">${n} — ${KMC_LABELS[n]}</option>`).join('')}
+        ${fromSelectOptionsHtml()}
       </select>
     </div>
     <div class="form-row">

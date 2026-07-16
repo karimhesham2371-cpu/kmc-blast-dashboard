@@ -18,8 +18,61 @@ const SB_KEY     = process.env.SUPABASE_KEY;
 const DASH_PASS  = process.env.DASH_PASS    || 'kmc2026';
 const WH_TOKEN   = process.env.WH_TOKEN     || 'lm-sms-2026';
 
-const KMC_NUMBERS = ['+14702846015','+17862289189','+17866386625','+17866642007','+19168850241','+17262007337'];
+// ── Number registry ───────────────────────────────────────────────────────────
+// Every Telnyx number on the account, grouped by which brand/audience it was
+// bought for. All 26 live on the same messaging profile, whose webhook points
+// at this server — so inbound on ANY of them lands here. Campaigns pick their
+// own pool via the `numbers` jsonb column; campaigns with no pool set keep the
+// original 6 KMC numbers (KMC_NUMBERS) so the existing seller campaign's
+// behavior is unchanged.
+const NUMBER_GROUPS = [
+  { group: 'KMC (sellers)', numbers: {
+    '+14702846015': '470-284-6015 · Atlanta GA',
+    '+17862289189': '786-228-9189 · Miami FL',
+    '+17866386625': '786-638-6625 · Miami FL',
+    '+17866642007': '786-664-2007 · Miami FL',
+    '+19168850241': '916-885-0241 · Sacramento CA',
+    '+17262007337': '726-200-7337 · San Antonio TX',
+  }},
+  { group: 'LeadMamba (investors)', numbers: {
+    '+12144274962': '214-427-4962 · Dallas TX',
+    '+17866541780': '786-654-1780 · Miami FL',
+    '+16029037610': '602-903-7610 · Phoenix AZ',
+    '+17028277529': '702-827-7529 · Las Vegas NV',
+    '+16466321375': '646-632-1375 · New York NY',
+    '+19176724713': '917-672-4713 · New York NY',
+    '+13238311246': '323-831-1246 · Los Angeles CA',
+    '+17132609927': '713-260-9927 · Houston TX',
+    '+13058468644': '305-846-8644 · Miami FL',
+    '+17864359106': '786-435-9106 · Miami FL',
+    '+17864359259': '786-435-9259 · Miami FL',
+    '+14048356067': '404-835-6067 · Atlanta GA',
+    '+16303898954': '630-389-8954 · Chicago IL',
+    '+13464809094': '346-480-9094 · Houston TX',
+    '+16893564775': '689-356-4775 · Orlando FL',
+  }},
+  { group: 'Spare', numbers: {
+    '+13126752435': '312-675-2435 · Chicago IL',
+    '+19163474799': '916-347-4799 · Sacramento CA',
+    '+14709320125': '470-932-0125 · Atlanta GA',
+    '+17869499467': '786-949-9467 · Miami FL',
+    '+12109856004': '210-985-6004 · San Antonio TX',
+  }},
+];
+const KMC_NUMBERS = Object.keys(NUMBER_GROUPS[0].numbers);
 const KMC_SET     = new Set(KMC_NUMBERS);
+const ALL_NUMBERS = NUMBER_GROUPS.flatMap(g => Object.keys(g.numbers));
+const ALL_SET     = new Set(ALL_NUMBERS);
+
+// A campaign's sending pool: its own validated `numbers` list, else the
+// legacy default (the 6 KMC numbers).
+function campaignNumbers(campaign) {
+  const pool = Array.isArray(campaign?.numbers)
+    ? campaign.numbers.filter(n => ALL_SET.has(n))
+    : [];
+  return pool.length ? pool : KMC_NUMBERS;
+}
+
 const STOP_RE     = /^(stop|unsubscribe|quit|cancel|end|remove me|opt.?out)[\s.!,]?$/i;
 
 // ── Reply classifier ──────────────────────────────────────────────────────────
@@ -100,6 +153,43 @@ const MSG_A_DELAY_MS      = 2 * 60 * 1000; // 120s
 const NUDGE_ENABLED       = false;
 const NUDGE_DELAY_MS      = 4 * 60 * 60 * 1000;
 const NUDGE_TEXT          = "No rush, just let me know a good time and I'll call you then 👍";
+
+// ── Email-capture flow (flow_type: 'email_capture') ───────────────────────────
+// Investor/wholesaler campaigns: YES → ask for their email → reply containing
+// an email → POST it to the pitch-email webhook (Google Apps Script sends the
+// branded email from team@leadmamba.com) → confirmation SMS. Per-campaign copy
+// lives in kmc_campaigns.flow_config (jsonb): { email_ask: [..variants..],
+// email_done: "...", email_webhook: "https://..." } — these are the fallbacks.
+const EMAIL_ASK_DEFAULTS = [
+  "We're only working with a handful of investors right now — drop your email and I'll get you the info asap.",
+  "Perfect! I've got something I think you'll really like. What email can I reach you at?",
+];
+const EMAIL_DONE_DEFAULT = "Just sent it over 👍 Check your inbox (worth a peek at spam/promotions too). Any questions, just text me here.";
+const EMAIL_PITCH_WEBHOOK_DEFAULT = 'https://script.google.com/macros/s/AKfycbxxmtnHLJq1JzeRGBtTMslWLnPqiBWmqsmGoLkUF7Cf5xymDC-oLcBnfV_qHK_vA5fc/exec';
+const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+
+function emailAskVariants(campaign) {
+  const cfg = campaign?.flow_config;
+  const asks = Array.isArray(cfg?.email_ask) ? cfg.email_ask.filter(v => typeof v === 'string' && v.trim()) : [];
+  return asks.length ? asks : EMAIL_ASK_DEFAULTS;
+}
+
+// POST {phone, email, name} to the Apps Script that sends the pitch email.
+// Apps Script answers a POST with a 302 to a one-time googleusercontent URL —
+// fetch follows it automatically (redirect: 'follow' is the default).
+async function postPitchEmail(url, payload) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return { ok: res.ok, status: res.status };
+  } catch (e) {
+    console.error('[PitchEmail] webhook call failed:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
 function sbReq(method, table, body, qs, range) {
@@ -252,6 +342,49 @@ app.get('/api/stats', auth, async (req, res) => {
   });
 });
 
+// Number pool for the frontend (campaign number pickers, reply-from selects)
+app.get('/api/numbers', auth, (req, res) => {
+  res.json(NUMBER_GROUPS.map(g => ({
+    group: g.group,
+    numbers: Object.entries(g.numbers).map(([number, label]) => ({ number, label })),
+  })));
+});
+
+// Validate/normalize the per-campaign fields shared by POST and PATCH.
+// Returns {error} or {values} containing only the keys that were present.
+function sanitizeCampaignExtras(body) {
+  const values = {};
+  if ('flow_type' in body) {
+    if (!['callback', 'email_capture'].includes(body.flow_type)) return { error: 'flow_type must be callback or email_capture' };
+    values.flow_type = body.flow_type;
+  }
+  if ('numbers' in body) {
+    if (body.numbers != null && !Array.isArray(body.numbers)) return { error: 'numbers must be an array' };
+    const pool = (body.numbers || []).filter(n => ALL_SET.has(n));
+    if (body.numbers && body.numbers.length && !pool.length) return { error: 'none of those numbers exist on this account' };
+    values.numbers = pool.length ? [...new Set(pool)] : null;
+  }
+  if ('flow_config' in body) {
+    const cfg = body.flow_config;
+    if (cfg != null && (typeof cfg !== 'object' || Array.isArray(cfg))) return { error: 'flow_config must be an object' };
+    if (cfg == null) { values.flow_config = null; }
+    else {
+      const clean = {};
+      if (Array.isArray(cfg.email_ask)) {
+        const asks = cfg.email_ask.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim());
+        if (asks.length) clean.email_ask = asks.slice(0, 3);
+      }
+      if (typeof cfg.email_done === 'string' && cfg.email_done.trim()) clean.email_done = cfg.email_done.trim();
+      if (typeof cfg.email_webhook === 'string' && cfg.email_webhook.trim()) {
+        if (!/^https:\/\//i.test(cfg.email_webhook.trim())) return { error: 'email_webhook must be an https:// URL' };
+        clean.email_webhook = cfg.email_webhook.trim();
+      }
+      values.flow_config = Object.keys(clean).length ? clean : null;
+    }
+  }
+  return { values };
+}
+
 // Campaigns
 app.get('/api/campaigns', auth, async (req, res) => {
   res.json(await sb.get('kmc_campaigns', 'order=created_at.desc'));
@@ -260,21 +393,33 @@ app.get('/api/campaigns', auth, async (req, res) => {
 app.post('/api/campaigns', auth, async (req, res) => {
   const { name, daily_limit, message, message_2, message_3, auto_reply_enabled, auto_reply_message, quiet_hours_enabled, form_link } = req.body;
   if (!name || !message) return res.status(400).json({ error: 'name and message required' });
+  const extras = sanitizeCampaignExtras(req.body);
+  if (extras.error) return res.status(400).json({ error: extras.error });
   const r = await sb.post('kmc_campaigns', {
     name, daily_limit: daily_limit || 200, message,
     message_2: message_2 || null, message_3: message_3 || null,
     auto_reply_enabled: !!auto_reply_enabled, auto_reply_message: auto_reply_message || null,
     quiet_hours_enabled: !!quiet_hours_enabled, form_link: form_link || null,
+    flow_type: 'callback', numbers: null, flow_config: null,
+    ...extras.values,
     status: 'draft', sent_today: 0, total_contacts: 0, last_sent_date: null,
     created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
   });
+  // Surface DB write failures instead of masking them as success. On a
+  // PostgREST error, r.data is the error OBJECT (no [0]), so the old
+  // `r.data?.[0] || {ok:r.ok}` returned HTTP 200 {ok:false} with no `error`
+  // key — the UI then showed "Campaign created ✓" on a failed write.
+  if (!r.ok) { console.error('[Campaigns] create failed:', r.status, JSON.stringify(r.data)); return res.status(500).json({ error: r.data?.message || r.data?.hint || `DB write failed (HTTP ${r.status})` }); }
   res.json(r.data?.[0] || { ok: r.ok });
 });
 
 app.patch('/api/campaigns/:id', auth, async (req, res) => {
+  const extras = sanitizeCampaignExtras(req.body);
+  if (extras.error) return res.status(400).json({ error: extras.error });
   const r = await sb.patch('kmc_campaigns', `id=eq.${req.params.id}`, {
-    ...req.body, updated_at: new Date().toISOString(),
+    ...req.body, ...extras.values, updated_at: new Date().toISOString(),
   });
+  if (!r.ok) { console.error('[Campaigns] update failed:', r.status, JSON.stringify(r.data)); return res.status(500).json({ error: r.data?.message || r.data?.hint || `DB write failed (HTTP ${r.status})` }); }
   res.json(r.data?.[0] || { ok: r.ok });
 });
 
@@ -456,7 +601,7 @@ app.delete('/api/campaigns/:id/lists/:listId', auth, async (req, res) => {
   // Preserve opted-out contacts (their kmc_opt_outs entry is the real guard,
   // but keeping the row lets the UI show them as opted_out still) and anyone
   // in an active conversation — deleting mid-flow would strand them.
-  const KEEP_FLOW = new Set(['AWAITING_CALLBACK_TIME', 'CALL_SCHEDULED']);
+  const KEEP_FLOW = new Set(['AWAITING_CALLBACK_TIME', 'CALL_SCHEDULED', 'AWAITING_EMAIL', 'EMAIL_CAPTURED']);
   const toDelete = listContacts.filter(c =>
     c.status !== 'opted_out' && !KEEP_FLOW.has(c.flow_state)
   );
@@ -486,7 +631,7 @@ app.delete('/api/campaigns/:id/lists/legacy', auth, async (req, res) => {
   const legacyContacts = await sb.getAll('kmc_contacts',
     `campaign_id=eq.${id}&list_id=is.null&select=id,phone,status,flow_state`
   );
-  const KEEP_FLOW = new Set(['AWAITING_CALLBACK_TIME', 'CALL_SCHEDULED']);
+  const KEEP_FLOW = new Set(['AWAITING_CALLBACK_TIME', 'CALL_SCHEDULED', 'AWAITING_EMAIL', 'EMAIL_CAPTURED']);
   const toDelete = legacyContacts.filter(c => c.status !== 'opted_out' && !KEEP_FLOW.has(c.flow_state));
   const skipped  = legacyContacts.length - toDelete.length;
   for (let i = 0; i < toDelete.length; i += 100) {
@@ -587,7 +732,8 @@ async function runBlast(campaign) {
         await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { status: 'opted_out' });
         continue;
       }
-      const from = KMC_NUMBERS[ni % KMC_NUMBERS.length];
+      const pool = campaignNumbers(campaign);
+      const from = pool[ni % pool.length];
       const variantIdx = ni % variants.length;
       const template = variants[variantIdx];
       ni++;
@@ -666,7 +812,7 @@ app.get('/api/inbox', auth, async (req, res) => {
   const chunks = [];
   for (let i = 0; i < phones.length; i += CHUNK) chunks.push(phones.slice(i, i + CHUNK));
   const contactChunks = await Promise.all(chunks.map(chunk =>
-    sb.getAll('kmc_contacts', `select=phone,first_name,campaign_id,flow_state,scheduled_call_time_utc,needs_human,needs_human_reason&phone=in.(${chunk.map(encodeURIComponent).join(',')})&order=created_at.desc`)
+    sb.getAll('kmc_contacts', `select=phone,first_name,campaign_id,flow_state,scheduled_call_time_utc,needs_human,needs_human_reason,email&phone=in.(${chunk.map(encodeURIComponent).join(',')})&order=created_at.desc`)
   ));
   const contacts = contactChunks.flat();
 
@@ -678,6 +824,7 @@ app.get('/api/inbox', auth, async (req, res) => {
       name: (c.first_name || '').trim(),
       flowState: c.flow_state || null, scheduledCallTimeUtc: c.scheduled_call_time_utc || null,
       needsHuman: !!c.needs_human, needsHumanReason: c.needs_human_reason || null,
+      email: c.email || null,
     };
   }
 
@@ -713,6 +860,7 @@ app.get('/api/inbox', auth, async (req, res) => {
     c.scheduledCallTimeUtc = contact?.scheduledCallTimeUtc || null;
     c.needsHuman = contact?.needsHuman || false;
     c.needsHumanReason = contact?.needsHumanReason || null;
+    c.email = contact?.email || null;
     delete c.lastInboundTs;
     return c;
   }).sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
@@ -736,7 +884,7 @@ app.post('/api/campaigns/:id/test-send', auth, async (req, res) => {
   else template = c.message;
   if (!template?.trim()) return res.status(400).json({ error: 'That variant is empty' });
   const text = template.replace(/\{name\}/gi, 'Test').replace(/\{address\}/gi, '123 Sample St');
-  const r = await sendSMS(KMC_NUMBERS[0], phone, `[TEST] ${text}`);
+  const r = await sendSMS(campaignNumbers(c)[0], phone, `[TEST] ${text}`);
   console.log(`[TestSend] ${r.ok ? 'sent' : 'FAILED'} variant=${variant} — "${c.name}" → ${phone}`);
   res.json({ ok: r.ok, id: r.id, status: r.status, text });
 });
@@ -749,7 +897,7 @@ app.post('/api/campaigns/:id/test-send', auth, async (req, res) => {
 app.post('/api/send', auth, async (req, res) => {
   const { from, to, text } = req.body;
   if (!from || !to || !text) return res.status(400).json({ error: 'from, to, text required' });
-  if (!KMC_SET.has(from))   return res.status(400).json({ error: 'Invalid from number' });
+  if (!ALL_SET.has(from))   return res.status(400).json({ error: 'Invalid from number' });
   const optOut = await sb.get('kmc_opt_outs', `phone=eq.${encodeURIComponent(to)}`);
   if (optOut.length) return res.status(400).json({ error: 'Number has opted out' });
   const r = await sendSMS(from, to, text);
@@ -905,7 +1053,7 @@ app.post('/api/admin/reblast-setup', auth, async (req, res) => {
   else contactsQs += '&campaign_id=not.is.null';
   const allContacts = await sb.getAll('kmc_contacts', contactsQs);
 
-  const IN_FLOW = new Set(['AWAITING_CALLBACK_TIME', 'CALL_SCHEDULED', 'OPTED_OUT']);
+  const IN_FLOW = new Set(['AWAITING_CALLBACK_TIME', 'CALL_SCHEDULED', 'AWAITING_EMAIL', 'EMAIL_CAPTURED', 'OPTED_OUT']);
 
   const eligible     = allContacts.filter(c =>
     !optOuts.has(c.phone) &&
@@ -1154,7 +1302,7 @@ async function advanceFlow(from, to, type, text) {
       console.log(`[Flow] no contact row for ${from} — creating orphan row and sending Message A`);
       const newRow = {
         phone: from, first_name: '', address: '', campaign_id: null,
-        assigned_from: KMC_SET.has(to) ? to : null,
+        assigned_from: ALL_SET.has(to) ? to : null,
         status: 'sent', flow_state: 'AWAITING_INTEREST',
         lead_timezone: 'America/New_York',
         created_at: new Date().toISOString(),
@@ -1176,6 +1324,9 @@ async function advanceFlow(from, to, type, text) {
 
     // ── AWAITING_INTEREST: only a YES advances the flow. NO/other behavior
     // is completely unchanged (no auto-reply, handled entirely upstream).
+    // What a YES triggers depends on the campaign's flow_type:
+    //   'callback' (default)  → Message A (ask for a callback time)
+    //   'email_capture'       → ask for their email
     if (contact.flow_state === 'AWAITING_INTEREST' || !contact.flow_state) {
       if (type !== 'yes') return;
       if (!contact.campaign_id) { console.log(`[Flow] skip ${from} — contact ${contact.id} has no campaign_id`); return; }
@@ -1183,7 +1334,21 @@ async function advanceFlow(from, to, type, text) {
       const camp = camps[0];
       if (!camp) { console.log(`[Flow] skip ${from} — campaign ${contact.campaign_id} not found`); return; }
 
-      const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+      const replyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+
+      if (camp.flow_type === 'email_capture') {
+        const asks = emailAskVariants(camp);
+        const ask = asks[(contact.id || 0) % asks.length];
+        if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
+        const r = await sendSMS(replyFrom, from, ask);
+        await Promise.all([
+          sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: ask, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+          sb.patch('kmc_contacts', `id=eq.${contact.id}`, { flow_state: 'AWAITING_EMAIL', auto_replied: true }),
+        ]);
+        console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} email-ask — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
+        return;
+      }
+
       const msgA = MSG_A_TEMPLATE.replace(/\{PROPERTY_ADDRESS\}/g, contact.address || 'your property');
       // Wait before replying so it feels human, not like an instant bot. Safe
       // on Render: this fresh webhook request resets the 15-min idle-sleep timer,
@@ -1195,6 +1360,57 @@ async function advanceFlow(from, to, type, text) {
         sb.patch('kmc_contacts', `id=eq.${contact.id}`, { flow_state: 'AWAITING_CALLBACK_TIME', auto_replied: true }),
       ]);
       console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} Message A — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
+      return;
+    }
+
+    // ── AWAITING_EMAIL (email_capture flow): every inbound here is scanned
+    // for an email address — the YES/NO classification doesn't apply, except
+    // that a clean 'no' is left alone (upstream already logged the decline).
+    if (contact.flow_state === 'AWAITING_EMAIL') {
+      const email = (text.match(EMAIL_RE) || [null])[0];
+      if (!email) {
+        if (type === 'no') { console.log(`[Flow] ${from} — declined while AWAITING_EMAIL, no action`); return; }
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'no_email_in_reply' });
+        console.log(`[Flow] ${from} — reply without an email while AWAITING_EMAIL, flagged needs_human`);
+        return;
+      }
+
+      let camp = null;
+      if (contact.campaign_id) {
+        const camps = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
+        camp = camps[0] || null;
+      }
+      const cfg = camp?.flow_config || {};
+      const replyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+
+      // Store the email first — even if the pitch-email webhook fails, the
+      // captured address must never be lost.
+      await sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
+        email: email.toLowerCase(), email_captured_at: new Date().toISOString(), flow_state: 'EMAIL_CAPTURED',
+      });
+
+      const wr = await postPitchEmail(cfg.email_webhook || EMAIL_PITCH_WEBHOOK_DEFAULT, {
+        phone: from, email: email.toLowerCase(), name: contact.first_name || '',
+      });
+      if (!wr.ok) {
+        // Don't text "just sent it over" when nothing was sent — flag for a human.
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'pitch_email_failed' });
+        console.log(`[Flow] ${from} — email captured (${email}) but pitch-email webhook FAILED, flagged needs_human`);
+        return;
+      }
+
+      const doneMsg = cfg.email_done || EMAIL_DONE_DEFAULT;
+      const r = await sendSMS(replyFrom, from, doneMsg);
+      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: from, text: doneMsg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+      console.log(`[Flow] email captured ${email} → pitch email sent → ${r.ok ? 'sent' : 'FAILED'} confirmation SMS → ${from}`);
+      return;
+    }
+
+    // ── EMAIL_CAPTURED: never auto-reply again — surface anything further to
+    // a human, same policy as CALL_SCHEDULED.
+    if (contact.flow_state === 'EMAIL_CAPTURED') {
+      await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'message_after_email_captured' });
+      console.log(`[Flow] ${from} — inbound while EMAIL_CAPTURED, flagged needs_human`);
       return;
     }
 
@@ -1227,7 +1443,7 @@ async function advanceFlow(from, to, type, text) {
         return;
       }
 
-      const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+      const replyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
 
       // 'now' is treated as vague ("Now works, talk then!") — no separate
       // now-variant since the MSG_B_NOW_TEMPLATE has been removed per spec.
@@ -1280,7 +1496,10 @@ app.post('/webhook/sms', async (req, res) => {
     from = msg.from?.phone_number;
     to   = msg.to?.[0]?.phone_number;
     text = (msg.text || '').trim();
-    if (!from || !to || !KMC_SET.has(to)) return;
+    // Accept inbound on ANY account number (all 26 share this webhook via the
+    // messaging profile) — replies to non-KMC numbers used to be silently
+    // dropped here, which killed the LeadMamba/investor reply loop.
+    if (!from || !to || !ALL_SET.has(to)) return;
 
     if (STOP_RE.test(text)) {
       type = 'no';
@@ -1393,7 +1612,7 @@ async function sendOverdueNudges() {
     const already = await sb.get('kmc_outbound', `to=eq.${encodeURIComponent(contact.phone)}&text=eq.${encodeURIComponent(NUDGE_TEXT)}&limit=1`);
     if (already.length) continue;
 
-    const replyFrom = contact.assigned_from && KMC_SET.has(contact.assigned_from) ? contact.assigned_from : KMC_NUMBERS[0];
+    const replyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : KMC_NUMBERS[0];
     const r = await sendSMS(replyFrom, contact.phone, NUDGE_TEXT);
     await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: contact.phone, text: NUDGE_TEXT, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
     console.log(`[Nudge] ${r.ok ? 'sent' : 'FAILED'} → ${contact.phone}`);
