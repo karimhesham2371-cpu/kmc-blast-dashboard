@@ -188,6 +188,16 @@ function detectBuyerType(text) {
 }
 const BUYER_TYPES = ['cash_buyer', 'wholesaler', 'investor'];
 
+// Detects automated replies (business autoresponders / bots) so the flow never
+// treats them as a real answer — otherwise our auto-reply triggers THEIR
+// autoresponder, which triggers ours again, looping. These are common on
+// business landlines in a cold list ("Your message has been received by X",
+// "Paul has read your message", Podium/CRM auto-texts).
+const AUTORESPONDER_RE = /\b(has been received|has read your message|thank you for contacting|thanks for (texting|contacting|reaching)|out of office|automated (response|reply|message)|auto[- ]?reply|no longer (in service|available)|will (get|be) back|we('| a)?ll be with you|save (our|my) contact info|do not reply|this (is an|number is)( an)? automated|received your (message|text))\b/i;
+function isAutoresponder(text) {
+  return AUTORESPONDER_RE.test(text || '');
+}
+
 // POST {phone, email, name} to the Apps Script that sends the pitch email.
 // Apps Script answers a POST with a 302 to a one-time googleusercontent URL —
 // fetch follows it automatically (redirect: 'follow' is the default).
@@ -1374,6 +1384,19 @@ async function advanceFlow(from, to, type, text) {
       console.log(`[Flow] skip ${from} — opted out`); return;
     }
 
+    // Automated reply from the recipient (business autoresponder / bot). Never
+    // treat it as a real answer — that's what created the send→their-bot→send
+    // loop. Skip advancing the flow entirely, UNLESS the message actually
+    // contains an email (never drop a genuine email capture). One-time flag so
+    // a human can eyeball these obvious bot numbers.
+    if (isAutoresponder(text) && !EMAIL_RE.test(text)) {
+      if (!contact.needs_human) {
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'autoresponder_detected' });
+      }
+      console.log(`[Flow] ${from} — autoresponder detected, not advancing: "${(text||'').slice(0,50)}"`);
+      return;
+    }
+
     const tz = contact.lead_timezone || 'America/New_York';
 
     // ── AWAITING_INTEREST: what advances the flow depends on flow_type.
@@ -1399,14 +1422,24 @@ async function advanceFlow(from, to, type, text) {
         // "which are you?" opener classifies as 'other', not 'yes'). Detect and
         // tag their buyer type from the reply, then ask for their email.
         const buyerType = detectBuyerType(text);
+        // ATOMIC CLAIM before the human-delay + send. The old code slept 120s
+        // while flow_state was still AWAITING_INTEREST, so a burst of inbound
+        // (autoresponders fire several) each started its own delayed send →
+        // duplicate email-asks. This conditional update only succeeds for the
+        // FIRST handler; concurrent/later ones get 0 rows and bail. Guards the
+        // reconcile loop too.
+        const claim = await sb.patch('kmc_contacts',
+          `id=eq.${contact.id}&or=(flow_state.is.null,flow_state.eq.AWAITING_INTEREST)`,
+          { flow_state: 'AWAITING_EMAIL', auto_replied: true, ...(buyerType ? { buyer_type: buyerType } : {}) });
+        if (!Array.isArray(claim.data) || claim.data.length === 0) {
+          console.log(`[Flow] ${from} — email-ask already claimed (or claim failed), skipping duplicate`);
+          return;
+        }
         const asks = emailAskVariants(camp);
         const ask = asks[(contact.id || 0) % asks.length];
         if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
         const r = await sendSMS(replyFrom, from, ask);
-        await Promise.all([
-          sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: ask, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-          sb.patch('kmc_contacts', `id=eq.${contact.id}`, { flow_state: 'AWAITING_EMAIL', auto_replied: true, ...(buyerType ? { buyer_type: buyerType } : {}) }),
-        ]);
+        await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: ask, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
         console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} email-ask${buyerType ? ' ['+buyerType+']' : ''} — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
         return;
       }
@@ -1414,16 +1447,23 @@ async function advanceFlow(from, to, type, text) {
       // Callback flow: only a YES advances.
       if (type !== 'yes') return;
 
+      // ATOMIC CLAIM (same rationale as email_capture above) before the delayed
+      // Message A send, so a burst of inbound / the reconcile loop can't each
+      // fire their own Message A.
+      const claimCb = await sb.patch('kmc_contacts',
+        `id=eq.${contact.id}&or=(flow_state.is.null,flow_state.eq.AWAITING_INTEREST)`,
+        { flow_state: 'AWAITING_CALLBACK_TIME', auto_replied: true });
+      if (!Array.isArray(claimCb.data) || claimCb.data.length === 0) {
+        console.log(`[Flow] ${from} — Message A already claimed (or claim failed), skipping duplicate`);
+        return;
+      }
       const msgA = MSG_A_TEMPLATE.replace(/\{PROPERTY_ADDRESS\}/g, contact.address || 'your property');
       // Wait before replying so it feels human, not like an instant bot. Safe
       // on Render: this fresh webhook request resets the 15-min idle-sleep timer,
       // so a 2-min wait won't get cut short by the instance spinning down.
       if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
       const r = await sendSMS(replyFrom, from, msgA);
-      await Promise.all([
-        sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: msgA, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-        sb.patch('kmc_contacts', `id=eq.${contact.id}`, { flow_state: 'AWAITING_CALLBACK_TIME', auto_replied: true }),
-      ]);
+      await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: msgA, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
       console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} Message A — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
       return;
     }
