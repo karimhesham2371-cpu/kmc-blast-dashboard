@@ -796,10 +796,13 @@ app.get('/api/inbox', auth, async (req, res) => {
   const inboundQs  = 'order=timestamp.desc' + (sinceISO ? `&timestamp=gte.${sinceISO}` : '');
   const outboundQs = 'order=sent_at.desc'   + (sinceISO ? `&sent_at=gte.${sinceISO}`   : '');
 
-  const [inbound, outbound] = await Promise.all([
+  const [inbound, outbound, campaignRows] = await Promise.all([
     sb.getAll('kmc_replies',  inboundQs),
     sb.getAll('kmc_outbound', outboundQs),
+    sb.get('kmc_campaigns', 'select=id,name'),
   ]);
+  const campaignNameById = {};
+  for (const c of campaignRows) campaignNameById[c.id] = c.name;
 
   // Only look up contacts for phones that actually appear in the messages we
   // just fetched — pulling the ENTIRE kmc_contacts table (every lead ever
@@ -826,6 +829,7 @@ app.get('/api/inbox', auth, async (req, res) => {
     if (!c.phone || contactByPhone[c.phone]) continue;
     contactByPhone[c.phone] = {
       name: (c.first_name || '').trim(),
+      campaignId: c.campaign_id || null,
       flowState: c.flow_state || null, scheduledCallTimeUtc: c.scheduled_call_time_utc || null,
       needsHuman: !!c.needs_human, needsHumanReason: c.needs_human_reason || null,
       email: c.email || null,
@@ -835,13 +839,20 @@ app.get('/api/inbox', auth, async (req, res) => {
   const m = {};
   for (const r of outbound) {
     if (!r.to) continue;
-    if (!m[r.to]) m[r.to] = { phone: r.to, messages: [], lastActivity: '', hasReplied: false, replyType: null, lastInboundTs: null };
+    if (!m[r.to]) m[r.to] = { phone: r.to, messages: [], lastActivity: '', hasReplied: false, replyType: null, lastInboundTs: null, outboundCampaignId: null, lastOutboundTs: null };
     m[r.to].messages.push({ id: r.id, dir: 'out', text: r.text, ts: r.sent_at, from: r.from });
+    // Track the most-recent non-null campaign_id from this conversation's
+    // outbound messages — the fallback campaign attribution when the contact
+    // row has no campaign_id (orphans) or was deleted.
+    if (r.campaign_id != null && (!m[r.to].lastOutboundTs || r.sent_at > m[r.to].lastOutboundTs)) {
+      m[r.to].lastOutboundTs = r.sent_at;
+      m[r.to].outboundCampaignId = r.campaign_id;
+    }
     if (r.sent_at > m[r.to].lastActivity) m[r.to].lastActivity = r.sent_at;
   }
   for (const r of inbound) {
     const p = r.from;
-    if (!m[p]) m[p] = { phone: p, messages: [], lastActivity: '', hasReplied: false, replyType: null, lastInboundTs: null };
+    if (!m[p]) m[p] = { phone: p, messages: [], lastActivity: '', hasReplied: false, replyType: null, lastInboundTs: null, outboundCampaignId: null, lastOutboundTs: null };
     m[p].messages.push({ id: r.id, dir: 'in', text: r.text, ts: r.timestamp, type: r.type, to: r.to });
     m[p].hasReplied = true;
     // The conversation's classification (yes/no/other) must reflect the MOST
@@ -865,7 +876,14 @@ app.get('/api/inbox', auth, async (req, res) => {
     c.needsHuman = contact?.needsHuman || false;
     c.needsHumanReason = contact?.needsHumanReason || null;
     c.email = contact?.email || null;
+    // Campaign attribution: prefer the contact's campaign; fall back to the
+    // campaign that actually sent the outbound blast/auto-replies (covers
+    // orphan contacts and deleted contact rows). null = unassigned (manual-only).
+    c.campaignId = contact?.campaignId ?? c.outboundCampaignId ?? null;
+    c.campaignName = c.campaignId != null ? (campaignNameById[c.campaignId] || null) : null;
     delete c.lastInboundTs;
+    delete c.outboundCampaignId;
+    delete c.lastOutboundTs;
     return c;
   }).sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
 

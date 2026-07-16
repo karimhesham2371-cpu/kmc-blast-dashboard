@@ -288,6 +288,8 @@ let inboxFilter = 'all'; // all | yes | no | unread
 let inboxRefreshTimer = null;
 let inboxReadTs = {}; // phone → timestamp of last time we opened that conv
 let inboxDays = 7; // date-range filter sent to /api/inbox: 1 | 7 | 30 | 0(=all time)
+let inboxCampaign = 'all'; // campaign scope: 'all' | '<campaignId>' | 'unassigned'
+let inboxCampaignList = []; // [{id,name,flow_type}] for the inbox campaign selector
 // Conv list — with 3000+ conversations, forcing layout on every row is what
 // caused the scroll/hover lag. We now render every filtered row into the DOM
 // but rely on CSS `content-visibility:auto` (.conv-item) so the browser skips
@@ -327,9 +329,24 @@ function fromSelectOptionsHtml() {
     `</optgroup>`
   ).join('');
 }
-// Grouped checkbox grid for picking a campaign's sending numbers.
-function numberPickerHtml(prefix, selected) {
+// Map of number → campaign name that already uses it (excluding the campaign
+// currently being edited). A campaign with no explicit pool uses the 6 KMC
+// defaults, so those show as "in use" by that campaign — steering a new
+// campaign toward its own distinct numbers and preventing accidental overlap.
+function numbersUsedByOthers(excludeId) {
+  const map = {};
+  (inboxCampaignList || []).forEach(c => {
+    if (excludeId != null && String(c.id) === String(excludeId)) return;
+    const pool = (Array.isArray(c.numbers) && c.numbers.length) ? c.numbers : KMC_NUMBERS;
+    pool.forEach(n => { if (!map[n]) map[n] = c.name; });
+  });
+  return map;
+}
+// Grouped checkbox grid for picking a campaign's sending numbers. `usedMap`
+// (number → other campaign's name) flags numbers already in use elsewhere.
+function numberPickerHtml(prefix, selected, usedMap) {
   const sel = new Set(selected || []);
+  const used = usedMap || {};
   return NUMBER_GROUPS.map(g => `
     <div style="margin-top:8px">
       <div style="font-size:12px;color:var(--muted);font-weight:600;margin-bottom:4px">${esc(g.group)}
@@ -337,7 +354,10 @@ function numberPickerHtml(prefix, selected) {
         <a href="#" onclick="event.preventDefault();toggleNumGroup('${prefix}','${esc(g.group)}',false)" style="color:var(--muted);font-weight:400;margin-left:4px">none</a>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px">
-        ${g.numbers.map(n => `<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;font-weight:400"><input type="checkbox" class="numpick-${prefix}" data-group="${esc(g.group)}" value="${n.number}" ${sel.has(n.number)?'checked':''} style="width:auto">${esc(n.label)}</label>`).join('')}
+        ${g.numbers.map(n => {
+          const inUse = used[n.number];
+          return `<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;font-weight:400" title="${inUse?('Already used by: '+esc(inUse)):''}"><input type="checkbox" class="numpick-${prefix}" data-group="${esc(g.group)}" value="${n.number}" ${sel.has(n.number)?'checked':''} style="width:auto">${esc(n.label)}${inUse?` <span style="color:var(--yellow,#eab308);font-size:10px;white-space:nowrap">⚠ ${esc(inUse)}</span>`:''}</label>`;
+        }).join('')}
       </div>
     </div>`).join('');
 }
@@ -512,6 +532,7 @@ async function renderCampDetail(id) {
     apiJ('/api/campaigns'),
     apiJ(`/api/campaigns/${id}/stats`),
   ]);
+  inboxCampaignList = camps; // keep the used-by-others number map fresh
   const c = camps.find(x => x.id == id);
   if (!c) { campDetail = null; renderCampaigns(); return; }
 
@@ -567,8 +588,8 @@ async function renderCampDetail(id) {
         </div>
         <div class="form-row">
           <label class="form-label">Sending Numbers</label>
-          <div style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow-y:auto">${numberPickerHtml('edit', Array.isArray(c.numbers) && c.numbers.length ? c.numbers : KMC_NUMBERS)}</div>
-          <div class="form-hint">Blasts and auto-replies use only these numbers. Unchecked = falls back to the 6 KMC numbers.</div>
+          <div style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow-y:auto">${numberPickerHtml('edit', Array.isArray(c.numbers) && c.numbers.length ? c.numbers : KMC_NUMBERS, numbersUsedByOthers(c.id))}</div>
+          <div class="form-hint">Blasts and auto-replies use only these numbers. Ones marked ⚠ are used by another campaign — avoid overlap. Unchecked = falls back to the 6 KMC numbers.</div>
         </div>
         <div class="form-row">
           <label class="form-label">First Message — Variant 1 <span style="color:var(--red)">*</span></label>
@@ -863,7 +884,11 @@ async function deleteCamp(id, name) {
 }
 
 // Create modal
-function showCreateModal() {
+async function showCreateModal() {
+  // Load campaigns so the number picker can flag numbers already used by
+  // another campaign (prevents accidental cross-campaign number overlap).
+  try { inboxCampaignList = await apiJ('/api/campaigns') || []; } catch { inboxCampaignList = []; }
+  const usedMap = numbersUsedByOthers(null);
   const html = `<div class="modal-overlay" id="create-modal" onclick="if(event.target===this)closeModal()">
     <div class="modal" style="max-width:560px">
       <div class="modal-title">New Campaign</div>
@@ -881,8 +906,8 @@ function showCreateModal() {
 
       <div class="form-row">
         <label class="form-label">Sending Numbers</label>
-        <div style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow-y:auto">${numberPickerHtml('new', KMC_NUMBERS)}</div>
-        <div class="form-hint">The campaign blasts from (and auto-replies with) only these numbers, rotated round-robin. If none are checked, it falls back to the 6 KMC numbers.</div>
+        <div style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;max-height:220px;overflow-y:auto">${numberPickerHtml('new', [], usedMap)}</div>
+        <div class="form-hint">Pick this campaign's OWN numbers — ones marked ⚠ are already used by another campaign, so avoid them to keep the two fully separate. Numbers rotate round-robin. If none are checked, it falls back to the 6 KMC numbers.</div>
       </div>
 
       <div class="form-row"><label class="form-label">First Message — Variant 1 <span style="color:var(--red)">*</span></label><textarea class="form-input" id="new-msg" rows="3" placeholder="Hey {name}, I came across your property at {address}..."></textarea></div>
@@ -973,9 +998,20 @@ async function createCamp() {
 // ─────────────────────────────────────────────────────────────────────────────
 async function renderInbox() {
   const el = document.getElementById('view-inbox');
+  // Load the campaign list so the inbox can be scoped to a single campaign
+  // (a separate "inbox" per campaign). Fetched fresh so brand-new campaigns
+  // with zero replies are still selectable.
+  try { inboxCampaignList = await apiJ('/api/campaigns') || []; } catch { inboxCampaignList = []; }
+  const campOptions = ['<option value="all">📥 All campaigns</option>']
+    .concat(inboxCampaignList.map(c => `<option value="${c.id}" ${String(inboxCampaign)===String(c.id)?'selected':''}>${c.flow_type === 'email_capture' ? '📧' : '📞'} ${esc(c.name)}</option>`))
+    .concat([`<option value="unassigned" ${inboxCampaign==='unassigned'?'selected':''}>• Unassigned / manual</option>`])
+    .join('');
   el.innerHTML = `<div class="inbox-layout">
     <div class="conv-list">
-      <div class="conv-search"><input placeholder="Search phone or message..." oninput="filterConvs(this.value)" id="inbox-search-input"></div>
+      <div class="conv-search" style="display:flex;gap:8px;align-items:center">
+        <select id="inbox-campaign-select" onchange="setInboxCampaign(this.value)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:7px 10px;color:var(--text);font-size:13px;outline:none;cursor:pointer;max-width:200px">${campOptions}</select>
+        <input placeholder="Search phone or message..." oninput="filterConvs(this.value)" id="inbox-search-input" style="flex:1">
+      </div>
       <div class="inbox-filters" id="inbox-filters">
         <button class="filter-pill active"        onclick="setInboxFilter('all')"    id="pill-all">All</button>
         <button class="filter-pill pill-unread"   onclick="setInboxFilter('unread')" id="pill-unread">🔵 Unread</button>
@@ -1006,6 +1042,48 @@ function setInboxFilter(f) {
   const pill = document.getElementById('pill-' + f);
   if (pill) pill.classList.add('active');
   renderConvList(true);
+}
+
+// Scope inboxData to the selected campaign — this is what makes each campaign
+// its own "inbox". 'all' shows everything; 'unassigned' shows manual/orphan
+// conversations with no campaign; otherwise match the campaign id.
+function campaignScoped(list) {
+  if (inboxCampaign === 'all') return list;
+  if (inboxCampaign === 'unassigned') return list.filter(c => c.campaignId == null);
+  const id = parseInt(inboxCampaign);
+  return list.filter(c => c.campaignId === id);
+}
+
+function setInboxCampaign(v) {
+  inboxCampaign = v;
+  updateInboxCounts();
+  renderConvList(true);
+}
+
+// Recompute the reply-type pill labels from the campaign-scoped subset, so the
+// counts always match the campaign inbox you're looking at. The nav sidebar
+// badge stays GLOBAL (total unread across every campaign) so nothing gets lost.
+function updateInboxCounts() {
+  const scoped = campaignScoped(inboxData);
+  const unreadCount = scoped.filter(c => c.isUnread).length;
+  const yesCount    = scoped.filter(c => c.replyType === 'yes').length;
+  const noCount     = scoped.filter(c => c.hasReplied && c.replyType === 'no').length;
+  const otherCount  = scoped.filter(c => c.hasReplied && c.replyType === 'other').length;
+
+  const globalUnread = inboxData.filter(c => c.isUnread).length;
+  const badge = document.getElementById('inbox-badge');
+  if (badge) { badge.textContent = globalUnread || inboxData.length; badge.style.display = inboxData.length > 0 ? '' : 'none'; }
+
+  const pillAll = document.getElementById('pill-all');
+  const pillUnread = document.getElementById('pill-unread');
+  const pillYes = document.getElementById('pill-yes');
+  const pillNo = document.getElementById('pill-no');
+  const pillOther = document.getElementById('pill-other');
+  if (pillAll)    pillAll.textContent    = `All (${scoped.length})`;
+  if (pillUnread) pillUnread.textContent = `🔵 Unread (${unreadCount})`;
+  if (pillYes)    pillYes.textContent    = `✅ Interested (${yesCount})`;
+  if (pillNo)     pillNo.textContent     = `❌ Objections (${noCount})`;
+  if (pillOther)  pillOther.textContent  = `💬 Others (${otherCount})`;
 }
 
 // Marks every conversation in the CURRENT view as read — respects the active
@@ -1051,6 +1129,9 @@ function clearInboxFilters() {
   inboxFilter = 'all';
   inboxDays = 7;
   inboxSearch = '';
+  inboxCampaign = 'all';
+  const campSel = document.getElementById('inbox-campaign-select');
+  if (campSel) campSel.value = 'all';
   document.querySelectorAll('#inbox-filters .filter-pill').forEach(p => p.classList.remove('active'));
   document.getElementById('pill-all')?.classList.add('active');
   document.querySelectorAll('#inbox-date-filters .filter-pill').forEach(p => p.classList.remove('active'));
@@ -1079,26 +1160,7 @@ async function refreshInbox(resetScroll = false) {
   inboxReadTs = savedTs;
   inboxData.forEach(c => { c.isUnread = computeIsUnread(c); });
 
-  // Counts for pill labels
-  const unreadCount = inboxData.filter(c => c.isUnread).length;
-  const yesCount    = inboxData.filter(c => c.replyType === 'yes').length;
-  const noCount     = inboxData.filter(c => c.replyType === 'no').length;
-  const otherCount  = inboxData.filter(c => c.hasReplied && c.replyType === 'other').length;
-
-  const badge = document.getElementById('inbox-badge');
-  if (badge) { badge.textContent = unreadCount || inboxData.length; badge.style.display = inboxData.length > 0 ? '' : 'none'; }
-
-  const pillUnread = document.getElementById('pill-unread');
-  const pillYes    = document.getElementById('pill-yes');
-  const pillNo     = document.getElementById('pill-no');
-  const pillOther  = document.getElementById('pill-other');
-  const pillAll    = document.getElementById('pill-all');
-  if (pillAll)    pillAll.textContent    = `All (${inboxData.length})`;
-  if (pillUnread) pillUnread.textContent = `🔵 Unread (${unreadCount})`;
-  if (pillYes)    pillYes.textContent    = `✅ Interested (${yesCount})`;
-  if (pillNo)     pillNo.textContent     = `❌ Objections (${noCount})`;
-  if (pillOther)  pillOther.textContent  = `💬 Others (${otherCount})`;
-
+  updateInboxCounts();
   renderConvList(resetScroll);
 }
 
@@ -1119,6 +1181,10 @@ function computeIsUnread(c) {
 function convRowHtml(c) {
   const typeClass  = c.replyType === 'yes' ? 'badge-green' : c.replyType === 'no' ? 'badge-red' : 'badge-gray';
   const unreadCls  = c.isUnread ? ' unread' : '';
+  // Only show the campaign tag in the "All campaigns" view — inside a single
+  // campaign's inbox it'd be redundant on every row.
+  const campTag = (inboxCampaign === 'all' && c.campaignName)
+    ? `<span class="badge badge-gray" style="font-size:9px;padding:1px 5px;margin-left:2px">${esc(c.campaignName)}</span>` : '';
   return `<div class="conv-item${activeConv===c.phone?' active':''}${unreadCls}" onclick="openConv('${c.phone}')">
       <div class="conv-phone">
         ${c.name ? `<strong>${esc(c.name)}</strong> <span style="color:var(--muted);font-weight:400">${esc(c.phone)}</span>` : esc(c.phone)}
@@ -1126,14 +1192,14 @@ function convRowHtml(c) {
         ${c.isUnread ? `<span style="font-size:10px;color:var(--blue);font-weight:700;margin-left:2px">NEW</span>` : ''}
         <span class="conv-time">${fmtTime(c.lastActivity)}</span>
       </div>
-      <div class="conv-preview" style="${c.isUnread?'color:var(--text);font-weight:500':''}">${esc(c.preview)}</div>
+      <div class="conv-preview" style="${c.isUnread?'color:var(--text);font-weight:500':''}">${campTag}${esc(c.preview)}</div>
     </div>`;
 }
 
 // Filters inboxData down to the active filter/search — the cheap part, kept
 // separate from painting so scrolling never has to re-filter.
 function computeConvFilteredList() {
-  let list = inboxData;
+  let list = campaignScoped(inboxData);
   if (inboxFilter === 'yes')        list = list.filter(c => c.replyType === 'yes');
   else if (inboxFilter === 'no')    list = list.filter(c => c.replyType === 'no');
   else if (inboxFilter === 'other') list = list.filter(c => c.hasReplied && c.replyType === 'other');
