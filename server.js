@@ -739,6 +739,10 @@ async function runBlast(campaign) {
       ni++;
       const text = (template || '')
         .replace(/\{name\}/gi,    contact.first_name || '')
+        // {state} is an alias for the address field — for phone+state-only
+        // investor lists, the uploaded "state" lands in contact.address, so
+        // {state} lets those templates read naturally ("...in {state}?").
+        .replace(/\{state\}/gi,   contact.address    || '')
         .replace(/\{address\}/gi, contact.address    || '');
 
       const r  = await sendSMS(from, contact.phone, text);
@@ -883,7 +887,7 @@ app.post('/api/campaigns/:id/test-send', auth, async (req, res) => {
   else if (variant == 3) template = c.message_3;
   else template = c.message;
   if (!template?.trim()) return res.status(400).json({ error: 'That variant is empty' });
-  const text = template.replace(/\{name\}/gi, 'Test').replace(/\{address\}/gi, '123 Sample St');
+  const text = template.replace(/\{name\}/gi, 'Test').replace(/\{state\}/gi, 'Texas').replace(/\{address\}/gi, '123 Sample St');
   const r = await sendSMS(campaignNumbers(c)[0], phone, `[TEST] ${text}`);
   console.log(`[TestSend] ${r.ok ? 'sent' : 'FAILED'} variant=${variant} — "${c.name}" → ${phone}`);
   res.json({ ok: r.ok, id: r.id, status: r.status, text });
