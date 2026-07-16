@@ -174,6 +174,20 @@ function emailAskVariants(campaign) {
   return asks.length ? asks : EMAIL_ASK_DEFAULTS;
 }
 
+// Classify an investor's reply into one of the three buyer types the user
+// cares about. Order matters — checked most-specific first so a reply that
+// mentions more than one term resolves to the more distinctive identity
+// (a "wholesaler" who also "buys cash" is tagged wholesaler). Returns
+// 'wholesaler' | 'cash_buyer' | 'investor' | null (no clear signal).
+function detectBuyerType(text) {
+  const t = (text || '').toLowerCase();
+  if (/\bwholesal/i.test(t)) return 'wholesaler';                              // wholesale, wholesaler, wholesaling
+  if (/\b(flip|flipp|fix and flip|fix & flip|rehab|buy and hold|buy & hold|landlord|rental|investor|investing|\binvest\b|\bportfolio\b)/i.test(t)) return 'investor';
+  if (/\bcash\b|\bcash buyer\b|pay cash|\bbuyer\b|\bi buy\b|\bwe buy\b|\bbuying\b/i.test(t)) return 'cash_buyer';
+  return null;
+}
+const BUYER_TYPES = ['cash_buyer', 'wholesaler', 'investor'];
+
 // POST {phone, email, name} to the Apps Script that sends the pitch email.
 // Apps Script answers a POST with a 302 to a one-time googleusercontent URL —
 // fetch follows it automatically (redirect: 'follow' is the default).
@@ -836,7 +850,7 @@ app.get('/api/inbox', auth, async (req, res) => {
   const chunks = [];
   for (let i = 0; i < phones.length; i += CHUNK) chunks.push(phones.slice(i, i + CHUNK));
   const contactChunks = await Promise.all(chunks.map(chunk =>
-    sb.getAll('kmc_contacts', `select=phone,first_name,campaign_id,flow_state,scheduled_call_time_utc,needs_human,needs_human_reason,email&phone=in.(${chunk.map(encodeURIComponent).join(',')})&order=created_at.desc`)
+    sb.getAll('kmc_contacts', `select=phone,first_name,campaign_id,flow_state,scheduled_call_time_utc,needs_human,needs_human_reason,email,buyer_type&phone=in.(${chunk.map(encodeURIComponent).join(',')})&order=created_at.desc`)
   ));
   const contacts = contactChunks.flat();
 
@@ -849,7 +863,7 @@ app.get('/api/inbox', auth, async (req, res) => {
       campaignId: c.campaign_id || null,
       flowState: c.flow_state || null, scheduledCallTimeUtc: c.scheduled_call_time_utc || null,
       needsHuman: !!c.needs_human, needsHumanReason: c.needs_human_reason || null,
-      email: c.email || null,
+      email: c.email || null, buyerType: c.buyer_type || null,
     };
   }
 
@@ -893,6 +907,7 @@ app.get('/api/inbox', auth, async (req, res) => {
     c.needsHuman = contact?.needsHuman || false;
     c.needsHumanReason = contact?.needsHumanReason || null;
     c.email = contact?.email || null;
+    c.buyerType = contact?.buyerType || null;
     // Campaign attribution: prefer the contact's campaign; fall back to the
     // campaign that actually sent the outbound blast/auto-replies (covers
     // orphan contacts and deleted contact rows). null = unassigned (manual-only).
@@ -1361,13 +1376,17 @@ async function advanceFlow(from, to, type, text) {
 
     const tz = contact.lead_timezone || 'America/New_York';
 
-    // ── AWAITING_INTEREST: only a YES advances the flow. NO/other behavior
-    // is completely unchanged (no auto-reply, handled entirely upstream).
-    // What a YES triggers depends on the campaign's flow_type:
-    //   'callback' (default)  → Message A (ask for a callback time)
-    //   'email_capture'       → ask for their email
+    // ── AWAITING_INTEREST: what advances the flow depends on flow_type.
+    //   'callback' (default)  → only a YES → Message A (ask for a callback time)
+    //   'email_capture'       → any ENGAGED reply (not a hard 'no') → detect
+    //                           their buyer type, tag them, then ask for email.
+    // A 'no' never advances either flow; STOP is fully handled upstream.
     if (contact.flow_state === 'AWAITING_INTEREST' || !contact.flow_state) {
-      if (type !== 'yes') return;
+      // 'no' is a decline for both flows — bail early before any campaign fetch
+      // (preserves the original callback behavior of ignoring non-YES replies).
+      if (type === 'no') return;
+      // For callback campaigns, only a YES advances — but we can't know the
+      // flow type without the campaign, so fetch it before gating 'other'.
       if (!contact.campaign_id) { console.log(`[Flow] skip ${from} — contact ${contact.id} has no campaign_id`); return; }
       const camps = await sb.get('kmc_campaigns', `id=eq.${contact.campaign_id}`);
       const camp = camps[0];
@@ -1376,17 +1395,24 @@ async function advanceFlow(from, to, type, text) {
       const replyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
 
       if (camp.flow_type === 'email_capture') {
+        // Any engaged reply advances (a "wholesaler"/"cash buyer" answer to the
+        // "which are you?" opener classifies as 'other', not 'yes'). Detect and
+        // tag their buyer type from the reply, then ask for their email.
+        const buyerType = detectBuyerType(text);
         const asks = emailAskVariants(camp);
         const ask = asks[(contact.id || 0) % asks.length];
         if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
         const r = await sendSMS(replyFrom, from, ask);
         await Promise.all([
           sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: ask, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-          sb.patch('kmc_contacts', `id=eq.${contact.id}`, { flow_state: 'AWAITING_EMAIL', auto_replied: true }),
+          sb.patch('kmc_contacts', `id=eq.${contact.id}`, { flow_state: 'AWAITING_EMAIL', auto_replied: true, ...(buyerType ? { buyer_type: buyerType } : {}) }),
         ]);
-        console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} email-ask — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
+        console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} email-ask${buyerType ? ' ['+buyerType+']' : ''} — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
         return;
       }
+
+      // Callback flow: only a YES advances.
+      if (type !== 'yes') return;
 
       const msgA = MSG_A_TEMPLATE.replace(/\{PROPERTY_ADDRESS\}/g, contact.address || 'your property');
       // Wait before replying so it feels human, not like an instant bot. Safe
@@ -1423,9 +1449,12 @@ async function advanceFlow(from, to, type, text) {
       const replyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
 
       // Store the email first — even if the pitch-email webhook fails, the
-      // captured address must never be lost.
+      // captured address must never be lost. Also back-fill buyer_type if we
+      // couldn't detect it at intake but this reply reveals it.
+      const lateType = !contact.buyer_type ? detectBuyerType(text) : null;
       await sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
         email: email.toLowerCase(), email_captured_at: new Date().toISOString(), flow_state: 'EMAIL_CAPTURED',
+        ...(lateType ? { buyer_type: lateType } : {}),
       });
 
       const wr = await postPitchEmail(cfg.email_webhook || EMAIL_PITCH_WEBHOOK_DEFAULT, {
@@ -1624,6 +1653,33 @@ async function reconcileMissedAutoReplies() {
       await advanceFlow(reply.from, reply.to, 'yes', reply.text);
     }
     if (checked) console.log(`[Reconcile] checked ${checked} unique "yes" repliers from the last 7 days — re-sent Message A to ${advanced} still stuck in AWAITING_INTEREST`);
+
+    // Email-capture campaigns: an investor answering "wholesaler"/"cash buyer"
+    // to the "which are you?" opener classifies as 'other', so the yes-only
+    // pass above can't rescue a missed one. Scan recent ENGAGED (non-'no')
+    // replies that landed on an email-capture campaign's numbers and re-run the
+    // flow for anyone still stuck in AWAITING_INTEREST. Scoped to those
+    // campaigns' numbers so it never scans the (huge) seller-campaign traffic.
+    const emailCamps = await sb.get('kmc_campaigns', 'flow_type=eq.email_capture&select=id,numbers');
+    if (emailCamps.length) {
+      const nums = new Set();
+      emailCamps.forEach(c => campaignNumbers(c).forEach(n => nums.add(n)));
+      const enc = [...nums].map(encodeURIComponent).join(',');
+      const engaged = await sb.getAll('kmc_replies', `type=neq.no&to=in.(${enc})&timestamp=gte.${since}&order=timestamp.desc`);
+      const seenEc = new Set();
+      let ecChecked = 0, ecAdvanced = 0;
+      for (const reply of engaged) {
+        if (seenEc.has(reply.from)) continue;
+        seenEc.add(reply.from);
+        ecChecked++;
+        const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(reply.from)}&order=created_at.desc&limit=1`);
+        const contact = contacts[0];
+        if (!contact || contact.flow_state !== 'AWAITING_INTEREST') continue; // already progressed
+        ecAdvanced++;
+        await advanceFlow(reply.from, reply.to, reply.type, reply.text);
+      }
+      if (ecChecked) console.log(`[Reconcile] email-capture: checked ${ecChecked} engaged repliers — advanced ${ecAdvanced} still stuck in AWAITING_INTEREST`);
+    }
 
     if (NUDGE_ENABLED) await sendOverdueNudges();
   } catch (e) {

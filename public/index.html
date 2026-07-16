@@ -290,6 +290,17 @@ let inboxReadTs = {}; // phone → timestamp of last time we opened that conv
 let inboxDays = 7; // date-range filter sent to /api/inbox: 1 | 7 | 30 | 0(=all time)
 let inboxCampaign = 'all'; // campaign scope: 'all' | '<campaignId>' | 'unassigned'
 let inboxCampaignList = []; // [{id,name,flow_type}] for the inbox campaign selector
+let inboxType = 'all'; // buyer-type filter (email-capture campaigns): all|cash_buyer|wholesaler|investor|unknown
+// Buyer-type display map — icon + short label + badge color class.
+const BUYER_TYPE_META = {
+  cash_buyer: { label: 'Cash Buyer', icon: '💵', cls: 'badge-green' },
+  wholesaler: { label: 'Wholesaler', icon: '🤝', cls: 'badge-blue'  },
+  investor:   { label: 'Investor',   icon: '🏠', cls: 'badge-yellow'},
+};
+function buyerTypeBadge(t) {
+  const m = BUYER_TYPE_META[t];
+  return m ? `<span class="badge ${m.cls}" style="font-size:10px;padding:2px 6px">${m.icon} ${m.label}</span>` : '';
+}
 // Conv list — with 3000+ conversations, forcing layout on every row is what
 // caused the scroll/hover lag. We now render every filtered row into the DOM
 // but rely on CSS `content-visibility:auto` (.conv-item) so the browser skips
@@ -1027,6 +1038,14 @@ async function renderInbox() {
         <button class="filter-pill pill-no"       onclick="setInboxFilter('no')"     id="pill-no">❌ Objections</button>
         <button class="filter-pill"               onclick="setInboxFilter('other')"  id="pill-other">💬 Others</button>
       </div>
+      <div class="inbox-filters" id="inbox-type-filters" style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px;display:none">
+        <span style="font-size:11px;color:var(--muted);align-self:center;margin-right:2px">Type:</span>
+        <button class="filter-pill active" onclick="setInboxType('all')"        id="type-all">All</button>
+        <button class="filter-pill"        onclick="setInboxType('cash_buyer')" id="type-cash_buyer">💵 Cash Buyers</button>
+        <button class="filter-pill"        onclick="setInboxType('wholesaler')" id="type-wholesaler">🤝 Wholesalers</button>
+        <button class="filter-pill"        onclick="setInboxType('investor')"   id="type-investor">🏠 Investors</button>
+        <button class="filter-pill"        onclick="setInboxType('unknown')"    id="type-unknown">❓ Untyped</button>
+      </div>
       <div class="inbox-filters" id="inbox-date-filters" style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
         <button class="filter-pill" onclick="setInboxDays(1)"  id="pill-days-1">Today</button>
         <button class="filter-pill active" onclick="setInboxDays(7)"  id="pill-days-7">7 Days</button>
@@ -1067,10 +1086,18 @@ function campaignScoped(list) {
 
 function setInboxCampaign(v) {
   inboxCampaign = v;
+  inboxType = 'all'; // reset buyer-type filter when switching campaigns
   try { localStorage.setItem('kmc_inbox_campaign', v); } catch {}
   // A numeric campaign id → refetch just that campaign's messages (dedicated,
   // fast inbox). 'all'/'unassigned' → refetch the full set and filter locally.
   refreshInbox(true);
+}
+
+function setInboxType(t) {
+  inboxType = t;
+  document.querySelectorAll('#inbox-type-filters .filter-pill').forEach(p => p.classList.remove('active'));
+  document.getElementById('type-' + t)?.classList.add('active');
+  renderConvList(true);
 }
 
 // Recompute the reply-type pill labels from the campaign-scoped subset, so the
@@ -1097,6 +1124,23 @@ function updateInboxCounts() {
   if (pillYes)    pillYes.textContent    = `✅ Interested (${yesCount})`;
   if (pillNo)     pillNo.textContent     = `❌ Objections (${noCount})`;
   if (pillOther)  pillOther.textContent  = `💬 Others (${otherCount})`;
+
+  // Buyer-type filter row: only relevant for email-capture (investor)
+  // campaigns. Show it when any conversation in scope carries a buyer type,
+  // and label each pill with its count.
+  const typed = scoped.filter(c => c.buyerType);
+  const typeRow = document.getElementById('inbox-type-filters');
+  if (typeRow) {
+    typeRow.style.display = typed.length ? 'flex' : 'none';
+    const counts = { cash_buyer: 0, wholesaler: 0, investor: 0, unknown: 0 };
+    scoped.forEach(c => { counts[c.buyerType] != null ? counts[c.buyerType]++ : counts.unknown++; });
+    const set = (id, txt) => { const e = document.getElementById(id); if (e) e.textContent = txt; };
+    set('type-all',        `All (${scoped.length})`);
+    set('type-cash_buyer', `💵 Cash Buyers (${counts.cash_buyer})`);
+    set('type-wholesaler', `🤝 Wholesalers (${counts.wholesaler})`);
+    set('type-investor',   `🏠 Investors (${counts.investor})`);
+    set('type-unknown',    `❓ Untyped (${counts.unknown})`);
+  }
 }
 
 // Marks every conversation in the CURRENT view as read — respects the active
@@ -1143,8 +1187,11 @@ function clearInboxFilters() {
   inboxDays = 7;
   inboxSearch = '';
   inboxCampaign = 'all';
+  inboxType = 'all';
   const campSel = document.getElementById('inbox-campaign-select');
   if (campSel) campSel.value = 'all';
+  document.querySelectorAll('#inbox-type-filters .filter-pill').forEach(p => p.classList.remove('active'));
+  document.getElementById('type-all')?.classList.add('active');
   document.querySelectorAll('#inbox-filters .filter-pill').forEach(p => p.classList.remove('active'));
   document.getElementById('pill-all')?.classList.add('active');
   document.querySelectorAll('#inbox-date-filters .filter-pill').forEach(p => p.classList.remove('active'));
@@ -1205,6 +1252,7 @@ function convRowHtml(c) {
       <div class="conv-phone">
         ${c.name ? `<strong>${esc(c.name)}</strong> <span style="color:var(--muted);font-weight:400">${esc(c.phone)}</span>` : esc(c.phone)}
         ${c.hasReplied ? `<span class="badge ${typeClass}" style="font-size:10px;padding:2px 6px">${c.replyType||'reply'}</span>` : ''}
+        ${buyerTypeBadge(c.buyerType)}
         ${c.isUnread ? `<span style="font-size:10px;color:var(--blue);font-weight:700;margin-left:2px">NEW</span>` : ''}
         <span class="conv-time">${fmtTime(c.lastActivity)}</span>
       </div>
@@ -1220,6 +1268,9 @@ function computeConvFilteredList() {
   else if (inboxFilter === 'no')    list = list.filter(c => c.replyType === 'no');
   else if (inboxFilter === 'other') list = list.filter(c => c.hasReplied && c.replyType === 'other');
   else if (inboxFilter === 'unread') list = list.filter(c => c.isUnread);
+  // Buyer-type filter (email-capture campaigns): 'unknown' = engaged but untyped.
+  if (inboxType === 'unknown')      list = list.filter(c => !c.buyerType);
+  else if (inboxType !== 'all')     list = list.filter(c => c.buyerType === inboxType);
   if (inboxSearch) list = list.filter(c =>
     c.phone.includes(inboxSearch) || c.preview.toLowerCase().includes(inboxSearch)
   );
@@ -1278,6 +1329,7 @@ function openConv(phone) {
     <div class="thread-header">
       <div class="thread-phone">${displayName ? `<strong>${displayName}</strong> <span style="color:var(--muted);font-weight:400;font-size:13px">${esc(phone)}</span>` : esc(phone)}</div>
       ${conv.hasReplied ? `<span class="badge ${typeClass}">${conv.replyType||'reply'}</span>` : ''}
+      ${buyerTypeBadge(conv.buyerType)}
       <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="openConvSend('${esc(phone)}')">↗ Reply</button>
     </div>
     ${formatFlowStateLine(conv)}
