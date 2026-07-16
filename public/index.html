@@ -1002,6 +1002,14 @@ async function renderInbox() {
   // (a separate "inbox" per campaign). Fetched fresh so brand-new campaigns
   // with zero replies are still selectable.
   try { inboxCampaignList = await apiJ('/api/campaigns') || []; } catch { inboxCampaignList = []; }
+  // Restore the last-selected campaign scope (sticky per-campaign inbox), but
+  // fall back to 'all' if that campaign no longer exists.
+  const savedScope = localStorage.getItem('kmc_inbox_campaign');
+  if (savedScope && (savedScope === 'all' || savedScope === 'unassigned' || inboxCampaignList.some(c => String(c.id) === savedScope))) {
+    inboxCampaign = savedScope;
+  } else {
+    inboxCampaign = 'all';
+  }
   const campOptions = ['<option value="all">📥 All campaigns</option>']
     .concat(inboxCampaignList.map(c => `<option value="${c.id}" ${String(inboxCampaign)===String(c.id)?'selected':''}>${c.flow_type === 'email_capture' ? '📧' : '📞'} ${esc(c.name)}</option>`))
     .concat([`<option value="unassigned" ${inboxCampaign==='unassigned'?'selected':''}>• Unassigned / manual</option>`])
@@ -1050,14 +1058,19 @@ function setInboxFilter(f) {
 function campaignScoped(list) {
   if (inboxCampaign === 'all') return list;
   if (inboxCampaign === 'unassigned') return list.filter(c => c.campaignId == null);
-  const id = parseInt(inboxCampaign);
-  return list.filter(c => c.campaignId === id);
+  // Numeric id: the server already fetched ONLY this campaign's messages (by
+  // its number pool), so the loaded set is already the scoped set — return it
+  // as-is. Re-filtering by campaignId here would wrongly drop manual-only
+  // conversations (manual sends carry no campaign_id).
+  return list;
 }
 
 function setInboxCampaign(v) {
   inboxCampaign = v;
-  updateInboxCounts();
-  renderConvList(true);
+  try { localStorage.setItem('kmc_inbox_campaign', v); } catch {}
+  // A numeric campaign id → refetch just that campaign's messages (dedicated,
+  // fast inbox). 'all'/'unassigned' → refetch the full set and filter locally.
+  refreshInbox(true);
 }
 
 // Recompute the reply-type pill labels from the campaign-scoped subset, so the
@@ -1147,7 +1160,10 @@ function clearInboxFilters() {
 async function refreshInbox(resetScroll = false) {
   const list = document.getElementById('conv-list-items');
   if (list && !inboxData.length) list.innerHTML = '<div style="padding:40px;text-align:center"><div class="loader"></div></div>';
-  inboxData = await apiJ(`/api/inbox?days=${inboxDays}`);
+  // Dedicated per-campaign fetch: when a specific campaign is selected, ask the
+  // server for only that campaign's messages (much faster than pulling all).
+  const scopeParam = /^\d+$/.test(String(inboxCampaign)) ? `&campaign_id=${inboxCampaign}` : '';
+  inboxData = await apiJ(`/api/inbox?days=${inboxDays}${scopeParam}`);
 
   // A conversation is Unread if EITHER half of "we haven't dealt with this
   // reply yet" is true: we haven't replied back since their last inbound

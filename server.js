@@ -793,8 +793,25 @@ app.post('/api/campaigns/:id/blast', auth, async (req, res) => {
 app.get('/api/inbox', auth, async (req, res) => {
   const days = parseInt(req.query.days);
   const sinceISO = (days > 0) ? new Date(Date.now() - days * 86400000).toISOString() : null;
-  const inboundQs  = 'order=timestamp.desc' + (sinceISO ? `&timestamp=gte.${sinceISO}` : '');
-  const outboundQs = 'order=sent_at.desc'   + (sinceISO ? `&sent_at=gte.${sinceISO}`   : '');
+
+  // Optional ?campaign_id=N — a DEDICATED inbox for one campaign: only pull
+  // that campaign's messages instead of the whole table. Campaigns use
+  // distinct number pools, so a message belongs to a campaign iff it was
+  // sent-from / received-on one of that campaign's numbers. This is what makes
+  // a big single campaign's inbox fast (KMC alone is thousands of convs).
+  const campaignId = req.query.campaign_id ? parseInt(req.query.campaign_id) : null;
+  let poolInbound = '', poolOutbound = '';
+  if (campaignId) {
+    const camps = await sb.get('kmc_campaigns', `id=eq.${campaignId}`);
+    if (camps[0]) {
+      const enc = campaignNumbers(camps[0]).map(encodeURIComponent).join(',');
+      poolInbound  = `&to=in.(${enc})`;   // inbound replies landed ON these numbers
+      poolOutbound = `&from=in.(${enc})`; // outbound was sent FROM these numbers
+    }
+  }
+
+  const inboundQs  = 'order=timestamp.desc' + (sinceISO ? `&timestamp=gte.${sinceISO}` : '') + poolInbound;
+  const outboundQs = 'order=sent_at.desc'   + (sinceISO ? `&sent_at=gte.${sinceISO}`   : '') + poolOutbound;
 
   const [inbound, outbound, campaignRows] = await Promise.all([
     sb.getAll('kmc_replies',  inboundQs),
