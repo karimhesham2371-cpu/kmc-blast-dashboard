@@ -1353,6 +1353,11 @@ function openConv(phone) {
     <div class="thread-messages" id="thread-msgs">
       ${conv.messages.map(m => {
         const out = m.dir === 'out';
+        const hasMedia = Array.isArray(m.media) && m.media.length;
+        // Media-only messages (photos, no text) used to render an empty bubble —
+        // now show a "📷 N photo(s)" label plus the images below.
+        const bubbleText = (m.text && m.text.trim()) ? esc(m.text)
+          : hasMedia ? `📷 ${m.media.length} photo${m.media.length>1?'s':''}` : '';
         return `<div>
           ${out ? `<div class="msg-from" style="text-align:right">${ALL_LABELS[m.from]||m.from||''}</div>` : ''}
           <div class="msg ${out?'msg-out':'msg-in'}"
@@ -1361,7 +1366,10 @@ function openConv(phone) {
             data-phone="${esc(phone)}"
             data-text="${esc(m.text)}"
             data-type="${m.type||''}"
-          >${esc(m.text)}</div>
+          >${bubbleText}</div>
+          ${hasMedia ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px;${out?'justify-content:flex-end':''}">
+            ${m.media.map(md => `<a href="${esc(md.url)}" target="_blank" rel="noopener" title="Open full size"><img src="${esc(md.url)}" loading="lazy" style="width:120px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:pointer;background:var(--bg)"></a>`).join('')}
+          </div>` : ''}
           <div class="msg-time" style="text-align:${out?'right':'left'}">${fmtTs(m.ts)}</div>
         </div>`;
       }).join('')}

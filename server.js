@@ -215,6 +215,39 @@ async function postPitchEmail(url, payload) {
   }
 }
 
+// ── Inbound MMS media ──────────────────────────────────────────────────────────
+// Telnyx delivers inbound picture messages with temporary media URLs that
+// eventually expire. We download each image and re-host it in the Supabase
+// 'mms' storage bucket (public) so property photos are kept permanently, then
+// store the durable public URLs on the reply. If re-hosting fails for an image
+// we keep the raw Telnyx URL as a fallback so nothing is lost short-term.
+async function rehostMedia(mediaArr, keyPrefix) {
+  const out = [];
+  for (let i = 0; i < mediaArr.length; i++) {
+    const m = mediaArr[i];
+    const ctype = m.content_type || 'image/jpeg';
+    let finalUrl = m.url; // fallback: raw Telnyx URL
+    try {
+      const dl = await fetch(m.url);
+      if (!dl.ok) throw new Error('download HTTP ' + dl.status);
+      const buf = Buffer.from(await dl.arrayBuffer());
+      const ext = (ctype.split('/')[1] || 'jpg').replace('jpeg', 'jpg').replace(/[^a-z0-9]/gi, '');
+      const objectPath = `${keyPrefix}/${i + 1}.${ext}`;
+      const up = await fetch(`https://${SB_HOST}/storage/v1/object/mms/${objectPath}`, {
+        method: 'POST',
+        headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': ctype, 'x-upsert': 'true' },
+        body: buf,
+      });
+      if (!up.ok) throw new Error('upload HTTP ' + up.status);
+      finalUrl = `https://${SB_HOST}/storage/v1/object/public/mms/${objectPath}`;
+    } catch (e) {
+      console.error(`[MMS] rehost failed (${m.url?.slice(0, 60)}): ${e.message} — keeping Telnyx URL`);
+    }
+    out.push({ url: finalUrl, content_type: ctype });
+  }
+  return out;
+}
+
 // ── Supabase ──────────────────────────────────────────────────────────────────
 function sbReq(method, table, body, qs, range) {
   return new Promise((resolve, reject) => {
@@ -894,7 +927,7 @@ app.get('/api/inbox', auth, async (req, res) => {
   for (const r of inbound) {
     const p = r.from;
     if (!m[p]) m[p] = { phone: p, messages: [], lastActivity: '', hasReplied: false, replyType: null, lastInboundTs: null, outboundCampaignId: null, lastOutboundTs: null };
-    m[p].messages.push({ id: r.id, dir: 'in', text: r.text, ts: r.timestamp, type: r.type, to: r.to });
+    m[p].messages.push({ id: r.id, dir: 'in', text: r.text, ts: r.timestamp, type: r.type, to: r.to, media: r.media || null });
     m[p].hasReplied = true;
     // The conversation's classification (yes/no/other) must reflect the MOST
     // RECENT inbound message, not just whichever one this loop happens to
@@ -909,7 +942,10 @@ app.get('/api/inbox', auth, async (req, res) => {
 
   const convs = Object.values(m).map(c => {
     c.messages.sort((a, b) => new Date(a.ts) - new Date(b.ts));
-    c.preview = c.messages.at(-1)?.text?.slice(0, 60) || '';
+    const lastMsg = c.messages.at(-1);
+    c.preview = (lastMsg?.text?.slice(0, 60))
+      || (Array.isArray(lastMsg?.media) && lastMsg.media.length ? `📷 ${lastMsg.media.length} photo${lastMsg.media.length > 1 ? 's' : ''}` : '')
+      || '';
     const contact = contactByPhone[c.phone];
     c.name = contact?.name || '';
     c.flowState = contact?.flowState || null;
@@ -1632,6 +1668,11 @@ app.post('/webhook/sms', async (req, res) => {
     from = msg.from?.phone_number;
     to   = msg.to?.[0]?.phone_number;
     text = (msg.text || '').trim();
+    // Inbound MMS media (property photos etc.). Only images — ignore any other
+    // attachment types.
+    const incomingMedia = Array.isArray(msg.media)
+      ? msg.media.filter(m => m && m.url && (m.content_type || '').startsWith('image/'))
+      : [];
     // Accept inbound on ANY account number (all 26 share this webhook via the
     // messaging profile) — replies to non-KMC numbers used to be silently
     // dropped here, which killed the LeadMamba/investor reply loop.
@@ -1655,8 +1696,15 @@ app.post('/webhook/sms', async (req, res) => {
       }
     }
 
-    await sb.post('kmc_replies', { from, to, text, type, timestamp: new Date().toISOString(), synced: false });
-    console.log(`[Inbound] ${type.toUpperCase()} | ${from} → ${to} | "${text.slice(0, 60)}"`);
+    // Re-host any photos to permanent storage before logging the reply, so the
+    // durable URLs are stored on the row (Telnyx URLs expire). Safe to await —
+    // the webhook already 200'd above.
+    let media = null;
+    if (incomingMedia.length) {
+      media = await rehostMedia(incomingMedia, `${from.replace(/\D/g, '')}/${Date.now()}`);
+    }
+    await sb.post('kmc_replies', { from, to, text, type, media, timestamp: new Date().toISOString(), synced: false });
+    console.log(`[Inbound] ${type.toUpperCase()} | ${from} → ${to} | "${text.slice(0, 60)}"${media ? ` [${media.length} photo(s)]` : ''}`);
   } catch(e) {
     console.error('[webhook] failed to log inbound reply:', e.message);
     // Fall through anyway — if we at least parsed `from`/`type` before the
