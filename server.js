@@ -1419,6 +1419,18 @@ async function advanceFlow(from, to, type, text) {
       console.log(`[Flow] ${from} — auto-replies disabled for campaign ${contact.campaign_id}, leaving for manual handling`); return;
     }
 
+    // ── HUMAN-HANDLED OVERRIDE ──────────────────────────────────────────────
+    // If we have EVER manually texted this number, never auto-reply again, no
+    // matter what they send. Manual sends (Inbox reply box + Manual Send page,
+    // both via /api/send) are the only outbound rows logged with
+    // campaign_id = null; blasts and auto-replies always carry a campaign_id.
+    // So the presence of any null-campaign outbound to this phone means a human
+    // took over the conversation.
+    const manualSends = await sb.get('kmc_outbound', `to=eq.${encodeURIComponent(from)}&campaign_id=is.null&select=id&limit=1`);
+    if (manualSends.length) {
+      console.log(`[Flow] ${from} — manually texted before, skipping ALL auto-replies (human handled)`); return;
+    }
+
     const tz = contact.lead_timezone || 'America/New_York';
 
     // ── AWAITING_INTEREST: what advances the flow depends on flow_type.
