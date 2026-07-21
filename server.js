@@ -959,9 +959,18 @@ app.post('/api/campaigns/:id/test-send', auth, async (req, res) => {
 // after it was found to occasionally attribute the wrong campaign's saved
 // text to a contact when the same phone existed in more than one campaign).
 app.post('/api/send', auth, async (req, res) => {
-  const { from, to, text } = req.body;
-  if (!from || !to || !text) return res.status(400).json({ error: 'from, to, text required' });
+  const { from, text } = req.body;
+  if (!from || !req.body.to || !text) return res.status(400).json({ error: 'from, to, text required' });
   if (!ALL_SET.has(from))   return res.status(400).json({ error: 'Invalid from number' });
+  // Normalize the recipient to E.164 so the Manual Send box accepts any typed
+  // format ("(904) 508-6454", "904-508-6454", "9045086454", "+19045086454").
+  // Telnyx rejects anything that isn't a clean single number with
+  // "The 'to' address should be a single valid number."
+  const digits = String(req.body.to).replace(/\D/g, '');
+  if (digits.length !== 10 && !(digits.length === 11 && digits[0] === '1')) {
+    return res.status(400).json({ error: `"${req.body.to}" isn't a valid US phone number — enter a 10-digit number.` });
+  }
+  const to = '+1' + digits.slice(-10);
   const optOut = await sb.get('kmc_opt_outs', `phone=eq.${encodeURIComponent(to)}`);
   if (optOut.length) return res.status(400).json({ error: 'Number has opted out' });
   const r = await sendSMS(from, to, text);
