@@ -1368,7 +1368,7 @@ function openConv(phone) {
             data-type="${m.type||''}"
           >${bubbleText}</div>
           ${hasMedia ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px;${out?'justify-content:flex-end':''}">
-            ${m.media.map(md => `<a href="${esc(md.url)}" target="_blank" rel="noopener" title="Open full size"><img src="${esc(md.url)}" loading="lazy" style="width:120px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:pointer;background:var(--bg)"></a>`).join('')}
+            ${m.media.map(md => `<a href="${esc(md.url)}" target="_blank" rel="noopener" title="Open full size"><img src="${esc(md.url)}" style="width:120px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:pointer;background:var(--bg)"></a>`).join('')}
           </div>` : ''}
           <div class="msg-time" style="text-align:${out?'right':'left'}">${fmtTs(m.ts)}</div>
         </div>`;
