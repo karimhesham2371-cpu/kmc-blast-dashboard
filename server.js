@@ -1314,6 +1314,17 @@ function parseCallbackTime(text, tz) {
   // A question mixed in with a time ("7pm but who is this?") must NOT be
   // auto-confirmed — a human should handle it, per spec's explicit edge case.
   if (/\?/.test(raw)) return { kind: 'none', date: null };
+  // Deferrals are NOT callback times — "I'm busy right now, but I'll text you
+  // later and let you know" means the lead will reach out, not "call me now".
+  // These must run BEFORE the now-regex below, which would otherwise match the
+  // "right now" inside "busy right now" and schedule a call for the exact
+  // moment the lead said they can't talk (the Mike thread, Aug 4).
+  if (/\b(busy|driving|at work|in a meeting|in church|at church)\b/i.test(raw)) return { kind: 'none', date: null };
+  if (/\bnot\s+(right\s+)?now\b|\bnot a good time\b|\bcan'?t\s+(talk|chat|speak|answer)\b|\bcannot\s+(talk|chat|speak|answer)\b/i.test(raw)) return { kind: 'none', date: null };
+  // The lead saying THEY will contact US ("I'll call you later", "let me get
+  // back to you", "I'll let you know") — nothing to schedule on our side.
+  if (/\b(i'?ll|i\s+will|let\s+me|gonna|going\s+to)\b[^.!?]{0,40}\b(text|call|reach|contact|get\s+back|let\s+you\s+know|follow\s+up|hit\s+you)\b/i.test(raw)) return { kind: 'none', date: null };
+  if (/\bget\s+back\s+to\s+you\b|\blet\s+you\s+know\b/i.test(raw)) return { kind: 'none', date: null };
   if (/\b(now|asap|right now|call me now)\b/i.test(raw)) return { kind: 'now', date: new Date() };
   if (/\b(anytime|whenever)\b/i.test(raw)) return { kind: 'vague', date: null };
 
@@ -1368,8 +1379,15 @@ function parseCallbackTime(text, tz) {
 // ("7") is echoed with its resolved AM/PM so the confirmation isn't itself
 // ambiguous to the lead.
 function normalizeTimeEcho(raw, kind, date, tz) {
-  const trimmed = raw.trim();
+  const trimmed = raw.trim().replace(/[\s.!,;]+$/, '');
   if (/^\d{1,2}$/.test(trimmed) && date) return formatTimeShort(date, tz);
+  // Never parrot a long or multi-sentence reply back verbatim — "Perfect,
+  // <their whole paragraph> works 👍" reads as gibberish and instantly outs
+  // the bot. If chrono resolved a concrete time, confirm with that instead;
+  // otherwise fall back to a neutral "that" ("Perfect, that works 👍").
+  if (trimmed.length > 30 || /[.!;\n]/.test(trimmed)) {
+    return date ? formatTimeShort(date, tz) : 'that';
+  }
   let out = trimmed.replace(/(\d{1,2}(:\d{2})?)\s*([ap])\.?m\.?/gi, (m, h, min, ap) => `${h} ${ap.toUpperCase()}M`);
   return out.charAt(0).toUpperCase() + out.slice(1);
 }
