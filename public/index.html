@@ -1377,6 +1377,8 @@ function openConv(phone) {
     <div class="quick-replies" id="quick-replies" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 14px 8px">
       <button class="btn btn-ghost btn-sm" onclick="useCallbackTimeReply('${esc(phone)}')">☎️ Ask Best Callback Time</button>
       <button class="btn btn-ghost btn-sm" onclick="useFollowUpReply('${esc(phone)}')">📋 Follow Up — Filled Form?${displayName?` (${displayName})`:''}</button>
+      <button class="btn btn-ghost btn-sm" onclick="useStillInterestedReply('${esc(phone)}')">🔁 Still Interested?</button>
+      <button class="btn btn-ghost btn-sm" onclick="useFormBeforeCallReply('${esc(phone)}')">📝 Form Before Call</button>
       <button class="btn btn-ghost btn-sm" onclick="diagnoseAutoReply('${esc(phone)}')">🔍 Diagnose Contact/Campaign Match</button>
     </div>
     <div class="reply-bar">
@@ -1484,6 +1486,17 @@ function useFollowUpReply(phone) {
 // fallback (matching server.js), since /api/inbox doesn't return the address.
 function useCallbackTimeReply(phone) {
   fillReplyBox("Great! When's a good time to give you a quick call back about your property?");
+}
+
+// Re-engagement nudge for interested leads that went quiet.
+function useStillInterestedReply(phone) {
+  fillReplyBox("Hey, just checking again are you still interested in hearing our offer?");
+}
+
+// Pre-call form ask — get the property details before the call so the closer
+// can lead with an actual number.
+function useFormBeforeCallReply(phone) {
+  fillReplyBox("Perfect, One thing before I call, so I can bring you an actual number instead of wasting your time with 20 questions, mind filling this quick property form? Takes 2 min: https://kmcashoffers.com/get-offer. Talk then!");
 }
 
 // Replays the exact contact/campaign lookup advanceFlow() (the live YES-reply
