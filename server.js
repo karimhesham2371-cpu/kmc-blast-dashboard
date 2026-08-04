@@ -432,6 +432,7 @@ function sanitizeCampaignExtras(body) {
         if (asks.length) clean.email_ask = asks.slice(0, 3);
       }
       if (typeof cfg.email_done === 'string' && cfg.email_done.trim()) clean.email_done = cfg.email_done.trim();
+      if (typeof cfg.sms_intake === 'boolean') clean.sms_intake = cfg.sms_intake;
       if (typeof cfg.email_webhook === 'string' && cfg.email_webhook.trim()) {
         if (!/^https:\/\//i.test(cfg.email_webhook.trim())) return { error: 'email_webhook must be an https:// URL' };
         clean.email_webhook = cfg.email_webhook.trim();
