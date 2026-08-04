@@ -518,7 +518,7 @@ async function renderCampaigns() {
       const p = pct(c.total_contacts - (c.sent_today||0), c.total_contacts);
       return `<tr>
         <td><div style="font-weight:600;cursor:pointer;color:var(--green)" onclick="openCamp(${c.id})">${esc(c.name)}</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${fmtTime(c.created_at)}</div></td>
-        <td style="font-size:12px;white-space:nowrap">${c.flow_type === 'email_capture' ? '📧 Email capture' : '📞 Callback'}<div style="font-size:11px;color:var(--muted);margin-top:2px">${(Array.isArray(c.numbers) && c.numbers.length ? c.numbers.length : KMC_NUMBERS.length)} numbers</div></td>
+        <td style="font-size:12px;white-space:nowrap">${c.flow_type === 'email_capture' ? '📧 Email capture' : (c.flow_config?.sms_intake ? '📝 SMS intake' : '📞 Callback')}<div style="font-size:11px;color:var(--muted);margin-top:2px">${(Array.isArray(c.numbers) && c.numbers.length ? c.numbers.length : KMC_NUMBERS.length)} numbers</div></td>
         <td>${statusBadge(c.status)}</td>
         <td>${(c.total_contacts||0).toLocaleString()}</td>
         <td><div style="display:flex;align-items:center;gap:8px"><div class="progress-wrap" style="flex:1"><div class="progress-bar" style="width:${pct(c.sent_today||0,c.total_contacts||1)}%"></div></div><span style="font-size:12px;color:var(--muted)">${c.sent_today||0}/${c.total_contacts||0}</span></div></td>
@@ -553,7 +553,7 @@ async function renderCampDetail(id) {
     <div>
       <div class="back-btn" onclick="campDetail=null;renderCampaigns()">← Back to campaigns</div>
       <div class="view-header">
-        <div><div class="view-title">${esc(c.name)}</div><div class="view-sub">${c.flow_type === 'email_capture' ? '📧 Email capture flow' : '📞 Callback flow'} · ${(Array.isArray(c.numbers) && c.numbers.length ? c.numbers.length : KMC_NUMBERS.length)} sending numbers</div></div>
+        <div><div class="view-title">${esc(c.name)}</div><div class="view-sub">${c.flow_type === 'email_capture' ? '📧 Email capture flow' : (c.flow_config?.sms_intake ? '📝 Callback + SMS intake flow' : '📞 Callback flow')} · ${(Array.isArray(c.numbers) && c.numbers.length ? c.numbers.length : KMC_NUMBERS.length)} sending numbers</div></div>
         ${statusBadge(c.status)}
       </div>
     </div>
@@ -593,7 +593,8 @@ async function renderCampDetail(id) {
         <div class="form-row">
           <label class="form-label">Auto-Reply Flow</label>
           <select class="form-input" id="edit-flow" onchange="onFlowTypeChange('edit')">
-            <option value="callback" ${c.flow_type !== 'email_capture' ? 'selected' : ''}>📞 Callback scheduling — sellers (YES → ask callback time → form link)</option>
+            <option value="callback" ${c.flow_type !== 'email_capture' && !c.flow_config?.sms_intake ? 'selected' : ''}>📞 Callback scheduling — sellers (YES → ask callback time → form link)</option>
+            <option value="callback_intake" ${c.flow_type !== 'email_capture' && c.flow_config?.sms_intake ? 'selected' : ''}>📝 Callback + SMS intake — sellers (YES → time → 4 questions → auto-submit form, no link)</option>
             <option value="email_capture" ${c.flow_type === 'email_capture' ? 'selected' : ''}>📧 Email capture — investors (YES → ask email → pitch email)</option>
           </select>
         </div>
@@ -619,7 +620,7 @@ async function renderCampDetail(id) {
           <textarea class="form-input" id="edit-msg3" rows="3">${esc(c.message_3||'')}</textarea>
           <div class="form-hint">Use {name} and {address} as placeholders. Filled variants rotate round-robin across contacts.</div>
         </div>
-        <div class="form-row" id="edit-callback-fields" style="border-top:1px solid var(--border);padding-top:14px;${c.flow_type === 'email_capture' ? 'display:none' : ''}">
+        <div class="form-row" id="edit-callback-fields" style="border-top:1px solid var(--border);padding-top:14px;${(c.flow_type === 'email_capture' || c.flow_config?.sms_intake) ? 'display:none' : ''}">
           <label class="form-label">Form Link <span style="color:var(--red)">*</span></label>
           <input class="form-input" id="edit-form-link" value="${esc(c.form_link||'')}" placeholder="https://kmcashoffers.com/get-offer">
           <div class="form-hint">Sent to the contact automatically once they confirm a callback time. Required for the automated YES → callback flow to complete — without it, matching contacts are flagged for manual follow-up instead.</div>
@@ -915,6 +916,7 @@ async function showCreateModal() {
         <label class="form-label">Auto-Reply Flow</label>
         <select class="form-input" id="new-flow" onchange="onFlowTypeChange('new')">
           <option value="callback">📞 Callback scheduling — sellers (YES → ask callback time → form link)</option>
+          <option value="callback_intake">📝 Callback + SMS intake — sellers (YES → time → 4 questions → auto-submit form, no link)</option>
           <option value="email_capture">📧 Email capture — investors (YES → ask email → pitch email)</option>
         </select>
         <div class="form-hint">What happens automatically when someone replies YES to the first message.</div>
@@ -969,15 +971,19 @@ function onFlowTypeChange(prefix) {
   const flow = document.getElementById(`${prefix}-flow`)?.value;
   const cb = document.getElementById(`${prefix}-callback-fields`);
   const em = document.getElementById(`${prefix}-email-fields`);
-  if (cb) cb.style.display = flow === 'email_capture' ? 'none' : '';
+  if (cb) cb.style.display = (flow === 'email_capture' || flow === 'callback_intake') ? 'none' : '';
   if (em) em.style.display = flow === 'email_capture' ? '' : 'none';
 }
 
 // Read the flow_type / numbers / flow_config fields shared by create + edit.
 function readFlowFields(prefix) {
-  const flow_type = document.getElementById(`${prefix}-flow`)?.value || 'callback';
+  // 'callback_intake' is a UI-only value: it saves as flow_type 'callback'
+  // with flow_config.sms_intake = true (the server key the flow checks).
+  const rawFlow = document.getElementById(`${prefix}-flow`)?.value || 'callback';
+  const flow_type = rawFlow === 'email_capture' ? 'email_capture' : 'callback';
   const picked = pickedNumbers(prefix);
   let flow_config = null;
+  if (rawFlow === 'callback_intake') flow_config = { sms_intake: true };
   if (flow_type === 'email_capture') {
     const ask1 = document.getElementById(`${prefix}-email-ask`)?.value.trim() || '';
     const ask2 = document.getElementById(`${prefix}-email-ask2`)?.value.trim() || '';
