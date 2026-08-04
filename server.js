@@ -1489,15 +1489,18 @@ function mapGoal(t) {
 
 // The Q&A chain. Order matters — occupancy first (easiest to answer), the open
 // "why" question last (people write more once they're already answering).
+// All intake copy is deliberately GSM-7 safe: no emoji, no em-dashes. A single
+// non-GSM char flips the whole message to UCS-2 (67 chars/segment instead of
+// 153), which nearly doubled per-message cost in the emoji drafts.
 const INTAKE_FLOW = [
   { state: 'INTAKE_OCCUPIED', field: 'occupied', map: mapOccupied,
-    ask: "First one — is the property vacant, rented out, or are you living in it?" },
+    ask: "First one - is the property vacant, rented out, or are you living in it?" },
   { state: 'INTAKE_REPAIRS', field: 'repairs_needed', map: mapRepairs,
-    ask: "Got it 👍 Condition-wise, what's closest? 1) needs full renovation 2) needs remodeling (kitchen/bath/roof) 3) just cosmetics like paint/flooring 4) fully updated. Reply 1-4." },
+    ask: "Got it. Condition-wise, what's closest? 1) needs full renovation 2) needs remodeling (kitchen/bath/roof) 3) just cosmetics like paint/flooring 4) fully updated. Reply 1-4." },
   { state: 'INTAKE_SPEED', field: 'how_fast', map: mapHowFast,
-    ask: "And if the number makes sense, how fast would you want to close — ASAP, 30, 60, or 90+ days?" },
+    ask: "And if the number makes sense, how fast would you want to close - ASAP, 30, 60, or 90+ days?" },
   { state: 'INTAKE_GOAL', field: 'goal', map: mapGoal,
-    ask: "Last one — what's got you thinking about selling?" },
+    ask: "Last one - what's got you thinking about selling?" },
 ];
 
 // Builds and submits the PropertyLead exactly like the webform does (then
@@ -1751,7 +1754,7 @@ async function advanceFlow(from, to, type, text) {
         if (parsed.kind === 'now') parsed.kind = 'vague';
         const timeEcho = normalizeTimeEcho(text, parsed.kind, parsed.date, tz);
         const q1 = INTAKE_FLOW[0];
-        const msg = `Perfect, ${timeEcho} works 👍 While I get your file ready, 4 quick questions so I can bring you an actual number on the call. ${q1.ask}`;
+        const msg = `Perfect, ${timeEcho} works! While I get your file ready, 4 quick questions so I can bring you an actual number on the call. ${q1.ask}`;
         const intakeReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
         const r = await sendSMS(intakeReplyFrom, from, msg);
         await Promise.all([
@@ -1837,7 +1840,7 @@ async function advanceFlow(from, to, type, text) {
         msg = next.ask; nextState = next.state;
       } else {
         const timeShort = contact.scheduled_call_time_utc ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
-        msg = `That's everything 👍 Quick confirm — you're the owner of ${contact.address || 'the property'} and you're good with a call ${timeShort ? 'at ' + timeShort : 'at the time we set'}? Reply YES and you're locked in.`;
+        msg = `That's everything! Quick confirm - you're the owner of ${contact.address || 'the property'} and you're good with a call ${timeShort ? 'at ' + timeShort : 'at the time we set'}? Reply YES and you're locked in.`;
         nextState = 'INTAKE_CONSENT';
       }
       const r = await sendSMS(stepReplyFrom, from, msg);
@@ -1869,7 +1872,7 @@ async function advanceFlow(from, to, type, text) {
       const sub = await submitPropertyLead(contact, intake);
       const timeShort = contact.scheduled_call_time_utc ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
       const consentReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
-      const msg = `✅ You're all set${timeShort ? ' — talk at ' + timeShort : ''}! Keep an eye out for our call.`;
+      const msg = `You're all set${timeShort ? ' - talk at ' + timeShort : ''}! Keep an eye out for our call.`;
       const r = await sendSMS(consentReplyFrom, from, msg);
       await Promise.all([
         sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: consentReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
