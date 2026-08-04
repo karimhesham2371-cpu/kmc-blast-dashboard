@@ -1404,6 +1404,132 @@ function formatTimeShort(date, tz, ref = new Date()) {
   return `${hourLabel} ${weekday}`;
 }
 
+// ── SMS intake (opt-in per campaign: flow_config.sms_intake = true) ───────────
+// Replaces the Message-B form link with a 4-question SMS Q&A + a consent
+// confirm, after which the SERVER submits the kmcashoffers.com get-offer form
+// (Base44 entity PropertyLead, anonymous create allowed) itself. Rationale:
+// leads answer texts but don't open links — the webform's data still gets
+// collected, we just type it in for them. Answers are keyword-mapped to the
+// form's EXACT dropdown values; an unmappable answer flags needs_human and
+// halts the auto-flow rather than guessing. NOTE: server submissions carry no
+// TrustedForm certificate — the lead's logged YES reply in kmc_replies is the
+// consent record instead.
+const B44_APP_ID = '6a2a7ab9c8ad174f6c514c86';
+
+function b44Req(pathname, body) {
+  return new Promise(resolve => {
+    const payload = JSON.stringify(body);
+    const req = https.request({
+      hostname: 'base44.app', path: pathname, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        try { resolve({ ok: res.statusCode < 300, status: res.statusCode, data: d ? JSON.parse(d) : null }); }
+        catch { resolve({ ok: false, status: res.statusCode, data: d }); }
+      });
+    });
+    req.on('error', e => resolve({ ok: false, error: e.message }));
+    req.write(payload); req.end();
+  });
+}
+
+// Answer mappers — return one of the get-offer form's exact dropdown strings,
+// or null when the reply can't be confidently mapped (→ needs_human).
+function mapOccupied(t) {
+  if (/\b(vacant|empty|nobody|no one|unoccupied)\b/i.test(t)) return 'Vacant';
+  if (/\b(rent|tenant|lease|leased|renter)/i.test(t)) return 'Tenant Occupied';
+  if (/\b(live|living|i stay|we stay|my home|our home|owner occ|me and|i'?m (in|here)|we'?re (in|here))\b/i.test(t)) return 'Owner Occupied';
+  return null;
+}
+function mapRepairs(t) {
+  if (/^\s*1\s*\.?\s*$/.test(t) || /\b(full|gut|everything|tear ?down|major work|complete reno|falling apart)\b/i.test(t)) return 'Full Gut Renovation - Everything';
+  if (/^\s*2\s*\.?\s*$/.test(t) || /\b(remodel|kitchen|bath|roof|hvac|plumbing|electric|foundation)\b/i.test(t)) return 'Remodel - Kitchen, Bathroom, Roof';
+  if (/^\s*3\s*\.?\s*$/.test(t) || /\b(cosmetic|paint|floor|carpet|minor|small stuff|little|touch ?up)\b/i.test(t)) return 'Cosmetic - Flooring, Paint';
+  if (/^\s*4\s*\.?\s*$/.test(t) || /\b(updated|renovated|like new|nothing|none|excellent|perfect|move.?in ready|good (condition|shape)|great (condition|shape))\b/i.test(t)) return 'Fully renovated and updated in past 2 years';
+  return null;
+}
+function mapHowFast(t) {
+  if (/\b(asap|right away|immediately|now|yesterday|as soon as|fast|quick)\b/i.test(t)) return 'ASAP';
+  if (/\b(30|a month|one month|1 month|few weeks|4 weeks)\b/i.test(t)) return '30 Days';
+  if (/\b(60|two months|2 months)\b/i.test(t)) return '60 Days';
+  if (/\b(90|three months|3 months)\b/i.test(t)) return '90 Days';
+  if (/\b(120|four months|4 months|no rush|whenever|flexible|not in a hurry|end of (the )?year)\b/i.test(t)) return '90~120 Days';
+  return null;
+}
+// Why-selling maps to the form's 18 checkbox reasons; multiple can match
+// (joined ", " exactly like the webform does). Free text that matches nothing
+// is passed through as-is — it's often the most useful thing the closer reads,
+// and this question must never stall the flow.
+const GOAL_KEYWORDS = [
+  [/foreclos/i, 'Preforeclosure'],
+  [/emergency/i, 'Emergency Reasons'],
+  [/financ|debt|bills|need (the )?money|need cash/i, 'Financial Reasons'],
+  [/vacant|empty|not.{0,10}living/i, 'Selling a vacant/non-occupied property'],
+  [/rent instead|rent it back|leaseback|stay as (a )?tenant/i, 'Sell and rent instead'],
+  [/death|passed away|passing|funeral/i, 'Death in the family'],
+  [/showings|private sale/i, 'Sell without showings'],
+  [/inherit|estate|probate/i, 'Inherited Property'],
+  [/downsiz|smaller (place|house|home)/i, 'Downsizing'],
+  [/landlord|tenants? (are|were)|tired of rent/i, 'Tired of being a landlord'],
+  [/closer to family|near (my )?family|grandkids/i, 'Moving closer to family'],
+  [/relocat|new job|job transfer|moving (to|out)/i, 'Relocating'],
+  [/retir/i, 'Retirement elsewhere'],
+  [/upgrad|bigger (place|house|home)/i, 'Upgrading'],
+  [/leaving the (country|us|states)|out of the country|abroad|overseas/i, 'Moving from United States'],
+  [/behind on|back taxes|taxes|mortgage payment/i, 'Behind on taxes/mortgage'],
+  [/old age|elderly|too old|getting older|health|too much to (maintain|keep up)/i, 'Old age'],
+  [/divorc|separat|split/i, 'Divorce'],
+];
+function mapGoal(t) {
+  const hits = GOAL_KEYWORDS.filter(([re]) => re.test(t)).map(([, v]) => v);
+  return hits.length ? [...new Set(hits)].join(', ') : (t || '').trim().slice(0, 200);
+}
+
+// The Q&A chain. Order matters — occupancy first (easiest to answer), the open
+// "why" question last (people write more once they're already answering).
+const INTAKE_FLOW = [
+  { state: 'INTAKE_OCCUPIED', field: 'occupied', map: mapOccupied,
+    ask: "First one — is the property vacant, rented out, or are you living in it?" },
+  { state: 'INTAKE_REPAIRS', field: 'repairs_needed', map: mapRepairs,
+    ask: "Got it 👍 Condition-wise, what's closest? 1) needs full renovation 2) needs remodeling (kitchen/bath/roof) 3) just cosmetics like paint/flooring 4) fully updated. Reply 1-4." },
+  { state: 'INTAKE_SPEED', field: 'how_fast', map: mapHowFast,
+    ask: "And if the number makes sense, how fast would you want to close — ASAP, 30, 60, or 90+ days?" },
+  { state: 'INTAKE_GOAL', field: 'goal', map: mapGoal,
+    ask: "Last one — what's got you thinking about selling?" },
+];
+
+// Builds and submits the PropertyLead exactly like the webform does (then
+// fires the same forwardLead backend function the site calls, best-effort).
+async function submitPropertyLead(contact, intake) {
+  const nameParts = (contact.first_name || '').trim().split(/\s+/);
+  const tz = contact.lead_timezone || 'America/New_York';
+  let prefDate = '', prefTime = '';
+  if (contact.scheduled_call_time_utc) {
+    const d = new Date(contact.scheduled_call_time_utc);
+    prefDate = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(d); // yyyy-mm-dd
+    const parts = new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: true, timeZone: tz }).formatToParts(d);
+    const hour = parts.find(p => p.type === 'hour')?.value;
+    const ap   = parts.find(p => p.type === 'dayPeriod')?.value;
+    if (hour && ap) prefTime = `${hour}:00 ${ap.toUpperCase()}`;
+  }
+  const payload = {
+    first_name: nameParts[0] || '', last_name: nameParts.slice(1).join(' '),
+    phone: contact.phone,
+    address: contact.address || '', city: '', state: '', zip_code: '',
+    house_type: '', bedrooms: '', bathrooms: '',
+    repairs_needed: intake.repairs_needed || '', occupied: intake.occupied || '',
+    how_fast: intake.how_fast || '', goal: intake.goal || '',
+    owner: 'Yes', owned_years: '', listed: '',
+    preferred_contact_date: prefDate, preferred_contact_time: prefTime,
+    source: 'sms_intake', trustedform_cert_url: '',
+  };
+  const r = await b44Req(`/api/apps/${B44_APP_ID}/entities/PropertyLead`, payload);
+  if (r.ok) b44Req(`/api/apps/${B44_APP_ID}/functions/forwardLead`, payload).catch(() => {});
+  return r;
+}
+
 // ── Callback-scheduling flow: per-conversation state machine ───────────────────
 // Restructures the old "YES → instant form link" auto-reply into:
 //   AWAITING_INTEREST → (YES) → Message A (ask for a callback time) → AWAITING_CALLBACK_TIME
@@ -1618,6 +1744,29 @@ async function advanceFlow(from, to, type, text) {
         return;
       }
 
+      // SMS-intake campaigns: no form link. Confirm the time and start the
+      // Q&A chain instead — the server will submit the form itself once the
+      // lead has answered + consented.
+      if (flowCamp.flow_config && flowCamp.flow_config.sms_intake) {
+        if (parsed.kind === 'now') parsed.kind = 'vague';
+        const timeEcho = normalizeTimeEcho(text, parsed.kind, parsed.date, tz);
+        const q1 = INTAKE_FLOW[0];
+        const msg = `Perfect, ${timeEcho} works 👍 While I get your file ready, 4 quick questions so I can bring you an actual number on the call. ${q1.ask}`;
+        const intakeReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+        const r = await sendSMS(intakeReplyFrom, from, msg);
+        await Promise.all([
+          sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: intakeReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+          sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
+            flow_state: q1.state,
+            scheduled_call_time_utc: parsed.date ? parsed.date.toISOString() : null,
+            raw_time_text: text,
+            intake: {},
+          }),
+        ]);
+        console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} intake Q1 (occupied) → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
+        return;
+      }
+
       // Every path past this point sends a message containing the form
       // link, so resolve it once up front. Per approved item #4: if the
       // campaign has no form_link set, do NOT send Message B — flag
@@ -1658,6 +1807,79 @@ async function advanceFlow(from, to, type, text) {
         }),
       ]);
       console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} Message B (${parsed.kind}) → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
+      return;
+    }
+
+    // ── INTAKE_* Q&A states: store the mapped answer, ask the next question.
+    // Unmappable answer or a question from the lead → needs_human, flow halts
+    // (staying in the same state; a closer's manual reply also trips the
+    // human-handled override so the bot never resumes on its own).
+    const intakeIdx = INTAKE_FLOW.findIndex(s => s.state === contact.flow_state);
+    if (intakeIdx !== -1) {
+      const step = INTAKE_FLOW[intakeIdx];
+      const priorIntake = contact.intake || {};
+      if (/\?/.test(text)) {
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: `intake_question_${step.field}`, intake: { ...priorIntake, ['raw_' + step.field]: text } });
+        console.log(`[Flow] ${from} — lead asked a question during intake (${step.field}), flagged needs_human`);
+        return;
+      }
+      const mapped = step.map(text);
+      if (mapped === null) {
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: `intake_unclear_${step.field}`, intake: { ...priorIntake, ['raw_' + step.field]: text } });
+        console.log(`[Flow] ${from} — unmappable intake answer for ${step.field}: "${text.slice(0, 60)}", flagged needs_human`);
+        return;
+      }
+      const intake = { ...priorIntake, [step.field]: mapped, ['raw_' + step.field]: text };
+      const next = INTAKE_FLOW[intakeIdx + 1];
+      const stepReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+      let msg, nextState;
+      if (next) {
+        msg = next.ask; nextState = next.state;
+      } else {
+        const timeShort = contact.scheduled_call_time_utc ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
+        msg = `That's everything 👍 Quick confirm — you're the owner of ${contact.address || 'the property'} and you're good with a call ${timeShort ? 'at ' + timeShort : 'at the time we set'}? Reply YES and you're locked in.`;
+        nextState = 'INTAKE_CONSENT';
+      }
+      const r = await sendSMS(stepReplyFrom, from, msg);
+      await Promise.all([
+        sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: stepReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+        sb.patch('kmc_contacts', `id=eq.${contact.id}`, { flow_state: nextState, intake }),
+      ]);
+      console.log(`[Flow] intake ${step.field}="${mapped}" → ${nextState} for ${from}`);
+      return;
+    }
+
+    // ── INTAKE_CONSENT: an explicit YES here is the consent record (logged in
+    // kmc_replies with timestamp — our TrustedForm substitute). Only then does
+    // the server submit the PropertyLead.
+    if (contact.flow_state === 'INTAKE_CONSENT') {
+      const intake = contact.intake || {};
+      if (/\?/.test(text) || type === 'no') {
+        const reason = type === 'no' ? 'intake_consent_declined' : 'intake_consent_question';
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: reason });
+        console.log(`[Flow] ${from} — consent not given (${reason}), flagged needs_human`);
+        return;
+      }
+      const consented = type === 'yes' || /\b(yes|yep|yeah|yup|correct|right|confirm(ed)?|ok|okay|sure|locked)\b/i.test(text);
+      if (!consented) {
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'intake_consent_unclear' });
+        console.log(`[Flow] ${from} — unclear consent reply, flagged needs_human`);
+        return;
+      }
+      const sub = await submitPropertyLead(contact, intake);
+      const timeShort = contact.scheduled_call_time_utc ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
+      const consentReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+      const msg = `✅ You're all set${timeShort ? ' — talk at ' + timeShort : ''}! Keep an eye out for our call.`;
+      const r = await sendSMS(consentReplyFrom, from, msg);
+      await Promise.all([
+        sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: consentReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+        sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
+          flow_state: 'CALL_SCHEDULED',
+          intake: { ...intake, consent_text: text, consent_at: new Date().toISOString(), form_submitted: !!sub.ok, b44_lead_id: sub.data?.id || null },
+          ...(sub.ok ? {} : { needs_human: true, needs_human_reason: 'form_submit_failed' }),
+        }),
+      ]);
+      console.log(`[Flow] intake complete for ${from} — PropertyLead ${sub.ok ? 'submitted (' + (sub.data?.id || '?') + ')' : 'SUBMIT FAILED ' + sub.status}`);
       return;
     }
 
