@@ -1386,8 +1386,12 @@ function normalizeTimeEcho(raw, kind, date, tz) {
   // <their whole paragraph> works 👍" reads as gibberish and instantly outs
   // the bot. If chrono resolved a concrete time, confirm with that instead;
   // otherwise fall back to a neutral "that" ("Perfect, that works 👍").
+  // Only quote a resolved clock time back when the lead actually GAVE one
+  // (kind 'specific'). Vague replies ("tomorrow afternoon about this time")
+  // resolve to an approximate — and sometimes wrong-timezone — timestamp;
+  // confirming "11 AM works!" to someone who said 1:30 PM reads as a bot bug.
   if (trimmed.length > 30 || /[.!;\n]/.test(trimmed)) {
-    return date ? formatTimeShort(date, tz) : 'that';
+    return (kind === 'specific' && date) ? formatTimeShort(date, tz) : 'that';
   }
   let out = trimmed.replace(/(\d{1,2}(:\d{2})?)\s*([ap])\.?m\.?/gi, (m, h, min, ap) => `${h} ${ap.toUpperCase()}M`);
   return out.charAt(0).toUpperCase() + out.slice(1);
@@ -1757,16 +1761,24 @@ async function advanceFlow(from, to, type, text) {
         const q1 = INTAKE_FLOW[0];
         const msg = `Perfect, ${timeEcho} works! While I get your file ready, 4 quick questions so I can bring you an actual number on the call. ${q1.ask}`;
         const intakeReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+        // ATOMIC CLAIM FIRST (the Kenny incident, Aug 5): the old order sent
+        // Q1 and saved the state after, unchecked — one transiently failed
+        // PATCH left the contact in AWAITING_CALLBACK_TIME, so his Q1 answer
+        // got parsed as a callback time and the flow silently died. Claiming
+        // before sending means a failed save = no message and a retry on
+        // their next reply, never a state/conversation mismatch.
+        const claimQ1 = await sb.patch('kmc_contacts', `id=eq.${contact.id}&flow_state=eq.AWAITING_CALLBACK_TIME`, {
+          flow_state: q1.state,
+          scheduled_call_time_utc: parsed.date ? parsed.date.toISOString() : null,
+          raw_time_text: text,
+          intake: { time_kind: parsed.kind },
+        });
+        if (!Array.isArray(claimQ1.data) || claimQ1.data.length === 0) {
+          console.error(`[Flow] ${from} — intake Q1 claim failed (status ${claimQ1.status}) — not sending, will retry on next reply`);
+          return;
+        }
         const r = await sendSMS(intakeReplyFrom, from, msg);
-        await Promise.all([
-          sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: intakeReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-          sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
-            flow_state: q1.state,
-            scheduled_call_time_utc: parsed.date ? parsed.date.toISOString() : null,
-            raw_time_text: text,
-            intake: {},
-          }),
-        ]);
+        await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: intakeReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
         console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} intake Q1 (occupied) → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
         return;
       }
@@ -1840,15 +1852,24 @@ async function advanceFlow(from, to, type, text) {
       if (next) {
         msg = next.ask; nextState = next.state;
       } else {
-        const timeShort = contact.scheduled_call_time_utc ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
-        msg = `That's everything! Quick confirm - you're the owner of ${contact.address || 'the property'} and you're good with a call ${timeShort ? 'at ' + timeShort : 'at the time we set'}? Reply YES and you're locked in.`;
+        // Only promise a specific clock time if they actually gave one — a
+        // vague "tomorrow afternoon" stores an approximate timestamp we must
+        // not read back as if it were their words.
+        const timeShort = (priorIntake.time_kind === 'specific' && contact.scheduled_call_time_utc)
+          ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
+        msg = `That's everything! Quick confirm - you're the owner of ${contact.address || 'the property'} and you're good with a call ${timeShort ? 'at ' + timeShort : 'at the time we discussed'}? Reply YES and you're locked in.`;
         nextState = 'INTAKE_CONSENT';
       }
+      // Claim the state transition BEFORE sending (see the Q1 claim above).
+      // Conditioned on the current step's state so a duplicate webhook or a
+      // double-tap reply can't advance twice or double-send a question.
+      const claimStep = await sb.patch('kmc_contacts', `id=eq.${contact.id}&flow_state=eq.${step.state}`, { flow_state: nextState, intake });
+      if (!Array.isArray(claimStep.data) || claimStep.data.length === 0) {
+        console.error(`[Flow] ${from} — intake step claim failed (${step.state} → ${nextState}, status ${claimStep.status}) — not sending`);
+        return;
+      }
       const r = await sendSMS(stepReplyFrom, from, msg);
-      await Promise.all([
-        sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: stepReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
-        sb.patch('kmc_contacts', `id=eq.${contact.id}`, { flow_state: nextState, intake }),
-      ]);
+      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: stepReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
       console.log(`[Flow] intake ${step.field}="${mapped}" → ${nextState} for ${from}`);
       return;
     }
@@ -1870,15 +1891,26 @@ async function advanceFlow(from, to, type, text) {
         console.log(`[Flow] ${from} — unclear consent reply, flagged needs_human`);
         return;
       }
+      // Claim BEFORE submitting/sending — this is also the dedup guard that
+      // stops a duplicate consent webhook from double-submitting the
+      // PropertyLead into Base44.
+      const claimDone = await sb.patch('kmc_contacts', `id=eq.${contact.id}&flow_state=eq.INTAKE_CONSENT`, {
+        flow_state: 'CALL_SCHEDULED',
+        intake: { ...intake, consent_text: text, consent_at: new Date().toISOString() },
+      });
+      if (!Array.isArray(claimDone.data) || claimDone.data.length === 0) {
+        console.error(`[Flow] ${from} — consent claim failed (status ${claimDone.status}) — not submitting`);
+        return;
+      }
       const sub = await submitPropertyLead(contact, intake);
-      const timeShort = contact.scheduled_call_time_utc ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
+      const timeShort = (intake.time_kind === 'specific' && contact.scheduled_call_time_utc)
+        ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
       const consentReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
       const msg = `You're all set${timeShort ? ' - talk at ' + timeShort : ''}! Keep an eye out for our call.`;
       const r = await sendSMS(consentReplyFrom, from, msg);
       await Promise.all([
         sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: consentReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
         sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
-          flow_state: 'CALL_SCHEDULED',
           intake: { ...intake, consent_text: text, consent_at: new Date().toISOString(), form_submitted: !!sub.ok, b44_lead_id: sub.data?.id || null },
           ...(sub.ok ? {} : { needs_human: true, needs_human_reason: 'form_submit_failed' }),
         }),
