@@ -2226,9 +2226,73 @@ async function reconcileMissedAutoReplies() {
       if (ecChecked) console.log(`[Reconcile] email-capture: checked ${ecChecked} engaged repliers — advanced ${ecAdvanced} still stuck in AWAITING_INTEREST`);
     }
 
+    await reconcileStalledQuestions();
+
     if (NUDGE_ENABLED) await sendOverdueNudges();
   } catch (e) {
     console.error('[Reconcile] failed:', e.message);
+  }
+}
+
+// ── Stalled-question backstop ────────────────────────────────────────────────
+// A contact's flow_state names the question they were last moved TO — but the
+// send that should have delivered that question can die without a trace: a
+// balance outage (sendSMS fails after the claim), a deploy restart killing an
+// in-flight 120s delay, or a transient Telnyx error. Claim-first makes those
+// failures safe (no corrupted conversations) but silent — the lead waits
+// forever (8 leads stranded on 2026-08-05 by exactly these causes). Every
+// reconcile pass this re-derives the question each mid-flow contact should
+// have received and re-sends it if the last DELIVERED message isn't it.
+const STALL_EXPECTED = {
+  AWAITING_CALLBACK_TIME: { fp: 'call back about', build: c => MSG_A_TEMPLATE.replace(/\{PROPERTY_ADDRESS\}/g, c.address || 'your property') },
+  INTAKE_PERMISSION: { fp: 'ask you a couple of questions', build: () => 'Great! Is it ok if I ask you a couple of questions about the property?' },
+  INTAKE_OCCUPIED: { fp: 'vacant, rented out', build: () => `Awesome! ${INTAKE_FLOW[0].ask}` },
+  INTAKE_REPAIRS: { fp: 'Condition-wise', build: () => INTAKE_FLOW[1].ask },
+  INTAKE_SPEED: { fp: 'how fast would you want to close', build: () => INTAKE_FLOW[2].ask },
+  INTAKE_GOAL: { fp: 'thinking about selling', build: () => INTAKE_FLOW[3].ask },
+  INTAKE_TIME: { fp: 'go over your number', build: () => "Last one - when's a good time to give you a quick call to go over your number?" },
+  INTAKE_CONSENT: { fp: 'Reply YES and you', build: (c, tz) => {
+    const timeShort = (c.intake?.time_kind === 'specific' && c.scheduled_call_time_utc) ? formatTimeShort(new Date(c.scheduled_call_time_utc), tz) : '';
+    return `That's everything! Quick confirm - you're the owner of ${c.address || 'the property'} and you're good with a call ${timeShort ? 'at ' + timeShort : 'at the time we discussed'}? Reply YES and you're locked in.`;
+  } },
+};
+async function reconcileStalledQuestions() {
+  try {
+    const states = Object.keys(STALL_EXPECTED);
+    const contacts = await sb.getAll('kmc_contacts', `flow_state=in.(${states.join(',')})&or=(needs_human.is.null,needs_human.eq.false)&campaign_id=not.is.null&select=id,phone,first_name,address,campaign_id,flow_state,assigned_from,lead_timezone,intake,scheduled_call_time_utc`);
+    if (!contacts.length) return;
+    const campRows = await sb.get('kmc_campaigns', 'select=id,auto_reply_enabled,numbers,flow_type,flow_config');
+    const campById = {}; campRows.forEach(cp => campById[cp.id] = cp);
+    let sent = 0;
+    for (const c of contacts) {
+      if (sent >= 20) { console.log('[StallFix] per-run cap reached, rest next pass'); break; }
+      const camp = campById[c.campaign_id];
+      if (!camp || !camp.auto_reply_enabled) continue;
+      const exp = STALL_EXPECTED[c.flow_state];
+      const enc = encodeURIComponent(c.phone);
+      const [lastOutRows, lastInRows, manualRows] = await Promise.all([
+        sb.get('kmc_outbound', `to=eq.${enc}&status=eq.sent&order=sent_at.desc&limit=1&select=text,sent_at`),
+        sb.get('kmc_replies', `from=eq.${enc}&order=timestamp.desc&limit=1&select=timestamp`),
+        sb.get('kmc_outbound', `to=eq.${enc}&campaign_id=is.null&select=id&limit=1`),
+      ]);
+      if (manualRows.length) continue; // human-handled override — bot stays out
+      const lastOut = lastOutRows[0];
+      if (lastOut && lastOut.text.includes(exp.fp)) continue; // question was delivered — waiting on the lead
+      // Settle window: never race an in-flight 120s delayed send or a live
+      // exchange — only step in once the thread has been quiet for 5+ min.
+      const newest = Math.max(lastOut ? new Date(lastOut.sent_at).getTime() : 0, lastInRows[0] ? new Date(lastInRows[0].timestamp).getTime() : 0);
+      if (Date.now() - newest < 5 * 60 * 1000) continue;
+      const tz = c.lead_timezone || 'America/New_York';
+      const msg = exp.build(c, tz);
+      const fromNum = (c.assigned_from && ALL_SET.has(c.assigned_from)) ? c.assigned_from : campaignNumbers(camp)[0];
+      const r = await sendSMS(fromNum, c.phone, msg);
+      await sb.post('kmc_outbound', { campaign_id: c.campaign_id, from: fromNum, to: c.phone, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+      sent++;
+      console.log(`[StallFix] ${r.ok ? 'resent' : 'RESEND FAILED'} ${c.flow_state} question → ${c.phone}`);
+    }
+    if (sent) console.log(`[StallFix] recovered ${sent} stalled conversation(s)`);
+  } catch (e) {
+    console.error('[StallFix] failed:', e.message);
   }
 }
 
