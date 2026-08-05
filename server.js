@@ -736,6 +736,15 @@ function easternHour() {
 function easternTimeLabel() {
   return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: SEND_TIMEZONE }).format(new Date()) + ' ET';
 }
+// Start of the current calendar day in Eastern, as a UTC ISO string. Used by
+// the Inbox "Today" pill — "today" must mean the ET calendar day, not a
+// rolling 24h window that drags in yesterday evening's blast.
+function startOfTodayET(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: SEND_TIMEZONE, hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }).formatToParts(now);
+  const get = t => parseInt(parts.find(p => p.type === t).value);
+  const elapsed = (get('hour') % 24) * 3600 + get('minute') * 60 + get('second');
+  return new Date(now.getTime() - elapsed * 1000 - now.getMilliseconds()).toISOString();
+}
 function isWithinSendWindow() {
   const hr = easternHour();
   return hr >= SEND_WINDOW_START && hr < SEND_WINDOW_END;
@@ -850,7 +859,8 @@ app.post('/api/campaigns/:id/blast', auth, async (req, res) => {
 // instead of re-pulling every message ever sent on every 10s auto-refresh.
 app.get('/api/inbox', auth, async (req, res) => {
   const days = parseInt(req.query.days);
-  const sinceISO = (days > 0) ? new Date(Date.now() - days * 86400000).toISOString() : null;
+  // days=1 is the "Today" pill → calendar today in ET. 7/30 stay rolling windows.
+  const sinceISO = days === 1 ? startOfTodayET() : (days > 0) ? new Date(Date.now() - days * 86400000).toISOString() : null;
 
   // Optional ?campaign_id=N — a DEDICATED inbox for one campaign: only pull
   // that campaign's messages instead of the whole table. Campaigns use
@@ -869,7 +879,9 @@ app.get('/api/inbox', auth, async (req, res) => {
   }
 
   const inboundQs  = 'order=timestamp.desc' + (sinceISO ? `&timestamp=gte.${sinceISO}` : '') + poolInbound;
-  const outboundQs = 'order=sent_at.desc'   + (sinceISO ? `&sent_at=gte.${sinceISO}`   : '') + poolOutbound;
+  // status=neq.failed: undelivered messages (e.g. the 5.5k balance-outage
+  // failures of 2026-08-05) must not appear as conversations/activity.
+  const outboundQs = 'order=sent_at.desc&status=neq.failed' + (sinceISO ? `&sent_at=gte.${sinceISO}` : '') + poolOutbound;
 
   const [inbound, outbound, campaignRows] = await Promise.all([
     sb.getAll('kmc_replies',  inboundQs),
@@ -966,7 +978,10 @@ app.get('/api/inbox', auth, async (req, res) => {
     return c;
   }).sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
 
-  res.json(convs);
+  // With overlapping number pools (e.g. August running on all 26 numbers) the
+  // pool pre-filter is only a superset — enforce true campaign membership via
+  // the per-conversation attribution (contact row, else sending campaign).
+  res.json(campaignId ? convs.filter(c => c.campaignId === campaignId) : convs);
 });
 
 // Test send — preview any of the 3 variants (or auto-reply) to a single number, no contact/campaign side-effects
