@@ -433,6 +433,7 @@ function sanitizeCampaignExtras(body) {
       }
       if (typeof cfg.email_done === 'string' && cfg.email_done.trim()) clean.email_done = cfg.email_done.trim();
       if (typeof cfg.sms_intake === 'boolean') clean.sms_intake = cfg.sms_intake;
+      if (typeof cfg.form_autosubmit === 'boolean') clean.form_autosubmit = cfg.form_autosubmit;
       if (typeof cfg.email_webhook === 'string' && cfg.email_webhook.trim()) {
         if (!/^https:\/\//i.test(cfg.email_webhook.trim())) return { error: 'email_webhook must be an https:// URL' };
         clean.email_webhook = cfg.email_webhook.trim();
@@ -2055,7 +2056,13 @@ async function advanceFlow(from, to, type, text) {
         console.error(`[Flow] ${from} — consent claim failed (status ${claimDone.status}) — not submitting`);
         return;
       }
-      const sub = await submitPropertyLead(contact, intake);
+      // Base44 form submission is OPT-IN per campaign (flow_config.form_autosubmit).
+      // Default OFF per Karim (2026-08-05): the intake jsonb holds the complete
+      // record; he submits the webform manually and pulls an end-of-day CSV.
+      let sub = null;
+      if (flowCamp.flow_config && flowCamp.flow_config.form_autosubmit) {
+        sub = await submitPropertyLead(contact, intake);
+      }
       const timeShort = (intake.time_kind === 'specific' && contact.scheduled_call_time_utc)
         ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
       const consentReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
@@ -2064,11 +2071,11 @@ async function advanceFlow(from, to, type, text) {
       await Promise.all([
         sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: consentReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
         sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
-          intake: { ...intake, consent_text: text, consent_at: new Date().toISOString(), form_submitted: !!sub.ok, b44_lead_id: sub.data?.id || null },
-          ...(sub.ok ? {} : { needs_human: true, needs_human_reason: 'form_submit_failed' }),
+          intake: { ...intake, consent_text: text, consent_at: new Date().toISOString(), intake_complete: true, form_submitted: !!(sub && sub.ok), b44_lead_id: sub?.data?.id || null },
+          ...((sub && !sub.ok) ? { needs_human: true, needs_human_reason: 'form_submit_failed' } : {}),
         }),
       ]);
-      console.log(`[Flow] intake complete for ${from} — PropertyLead ${sub.ok ? 'submitted (' + (sub.data?.id || '?') + ')' : 'SUBMIT FAILED ' + sub.status}`);
+      console.log(`[Flow] intake complete for ${from}${sub ? ' — PropertyLead ' + (sub.ok ? 'submitted (' + (sub.data?.id || '?') + ')' : 'SUBMIT FAILED ' + sub.status) : ' — stored only (manual form submission)'}`);
       return;
     }
 
