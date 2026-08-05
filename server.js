@@ -1505,7 +1505,7 @@ const INTAKE_FLOW = [
   { state: 'INTAKE_SPEED', field: 'how_fast', map: mapHowFast,
     ask: "And if the number makes sense, how fast would you want to close - ASAP, 30, 60, or 90+ days?" },
   { state: 'INTAKE_GOAL', field: 'goal', map: mapGoal,
-    ask: "Last one - what's got you thinking about selling?" },
+    ask: "And what's got you thinking about selling?" },
 ];
 
 // Builds and submits the PropertyLead exactly like the webform does (then
@@ -1662,6 +1662,27 @@ async function advanceFlow(from, to, type, text) {
 
       // Callback flow: only a YES advances.
       if (type !== 'yes') return;
+
+      // SMS-intake campaigns open with a PERMISSION ask instead of the
+      // callback-time question — leads kept answering "when can we call?"
+      // with prices and property details (the Kenny thread). The time
+      // question moves to the END of the intake (INTAKE_TIME), where it's
+      // the natural close.
+      if (camp.flow_config && camp.flow_config.sms_intake) {
+        const claimPerm = await sb.patch('kmc_contacts',
+          `id=eq.${contact.id}&or=(flow_state.is.null,flow_state.eq.AWAITING_INTEREST)`,
+          { flow_state: 'INTAKE_PERMISSION', auto_replied: true });
+        if (!Array.isArray(claimPerm.data) || claimPerm.data.length === 0) {
+          console.log(`[Flow] ${from} — permission-ask already claimed (or claim failed), skipping duplicate`);
+          return;
+        }
+        const permAsk = 'Great! Is it ok if I ask you a couple of questions about the property?';
+        if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
+        const rp = await sendSMS(replyFrom, from, permAsk);
+        await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: permAsk, status: rp.ok ? 'sent' : 'failed', telnyx_id: rp.id || null, sent_at: new Date().toISOString() });
+        console.log(`[Flow] ${rp.ok ? 'sent' : 'FAILED'} intake permission-ask — ${camp.name} → ${from}${rp.errDetail ? ' — ' + rp.errDetail : ''}`);
+        return;
+      }
 
       // ATOMIC CLAIM (same rationale as email_capture above) before the delayed
       // Message A send, so a burst of inbound / the reconcile loop can't each
@@ -1826,6 +1847,36 @@ async function advanceFlow(from, to, type, text) {
       return;
     }
 
+    // ── INTAKE_PERMISSION: the "ok to ask a couple of questions?" gate that
+    // opens the intake. A YES starts Q1; a no / question / anything unclear
+    // goes to a human.
+    if (contact.flow_state === 'INTAKE_PERMISSION') {
+      if (/\?/.test(text) || type === 'no') {
+        const reason = type === 'no' ? 'intake_permission_declined' : 'intake_permission_question';
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: reason });
+        console.log(`[Flow] ${from} — intake permission not granted (${reason}), flagged needs_human`);
+        return;
+      }
+      const granted = type === 'yes' || /\b(yes|yep|yeah|yup|sure|ok|okay|of course|go ahead|shoot|fine|absolutely)\b/i.test(text);
+      if (!granted) {
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'intake_permission_unclear' });
+        console.log(`[Flow] ${from} — unclear intake permission reply, flagged needs_human`);
+        return;
+      }
+      const q1 = INTAKE_FLOW[0];
+      const claimPermQ1 = await sb.patch('kmc_contacts', `id=eq.${contact.id}&flow_state=eq.INTAKE_PERMISSION`, { flow_state: q1.state, intake: {} });
+      if (!Array.isArray(claimPermQ1.data) || claimPermQ1.data.length === 0) {
+        console.error(`[Flow] ${from} — permission→Q1 claim failed (status ${claimPermQ1.status}) — not sending`);
+        return;
+      }
+      const permReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+      const q1msg = `Awesome! ${q1.ask}`;
+      const rq = await sendSMS(permReplyFrom, from, q1msg);
+      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: permReplyFrom, to: from, text: q1msg, status: rq.ok ? 'sent' : 'failed', telnyx_id: rq.id || null, sent_at: new Date().toISOString() });
+      console.log(`[Flow] ${rq.ok ? 'sent' : 'FAILED'} intake Q1 (permission granted) → ${from}`);
+      return;
+    }
+
     // ── INTAKE_* Q&A states: store the mapped answer, ask the next question.
     // Unmappable answer or a question from the lead → needs_human, flow halts
     // (staying in the same state; a closer's manual reply also trips the
@@ -1851,14 +1902,20 @@ async function advanceFlow(from, to, type, text) {
       let msg, nextState;
       if (next) {
         msg = next.ask; nextState = next.state;
-      } else {
-        // Only promise a specific clock time if they actually gave one — a
-        // vague "tomorrow afternoon" stores an approximate timestamp we must
-        // not read back as if it were their words.
-        const timeShort = (priorIntake.time_kind === 'specific' && contact.scheduled_call_time_utc)
+      } else if (contact.scheduled_call_time_utc) {
+        // Legacy order (time captured BEFORE the questions — leads already
+        // in-flight when the permission-first order shipped): straight to
+        // consent. Only promise a specific clock time if they actually gave
+        // one — a vague "tomorrow afternoon" stores an approximate timestamp
+        // we must not read back as if it were their words.
+        const timeShort = (priorIntake.time_kind === 'specific')
           ? formatTimeShort(new Date(contact.scheduled_call_time_utc), tz) : '';
         msg = `That's everything! Quick confirm - you're the owner of ${contact.address || 'the property'} and you're good with a call ${timeShort ? 'at ' + timeShort : 'at the time we discussed'}? Reply YES and you're locked in.`;
         nextState = 'INTAKE_CONSENT';
+      } else {
+        // Permission-first order: the time question is the natural close.
+        msg = "Last one - when's a good time to give you a quick call to go over your number?";
+        nextState = 'INTAKE_TIME';
       }
       // Claim the state transition BEFORE sending (see the Q1 claim above).
       // Conditioned on the current step's state so a duplicate webhook or a
@@ -1871,6 +1928,37 @@ async function advanceFlow(from, to, type, text) {
       const r = await sendSMS(stepReplyFrom, from, msg);
       await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: stepReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
       console.log(`[Flow] intake ${step.field}="${mapped}" → ${nextState} for ${from}`);
+      return;
+    }
+
+    // ── INTAKE_TIME: the callback-time question, asked at the END of the
+    // permission-first intake. Reuses the deferral-aware parser; anything
+    // unparseable goes to a human.
+    if (contact.flow_state === 'INTAKE_TIME') {
+      const parsed = parseCallbackTime(text, tz);
+      if (parsed.kind === 'none') {
+        await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'unparseable_time_reply', raw_time_text: text });
+        console.log(`[Flow] ${from} — unparseable time reply during intake, flagged needs_human`);
+        return;
+      }
+      if (parsed.kind === 'now') parsed.kind = 'vague';
+      const timeIntake = { ...(contact.intake || {}), time_kind: parsed.kind };
+      const claimTime = await sb.patch('kmc_contacts', `id=eq.${contact.id}&flow_state=eq.INTAKE_TIME`, {
+        flow_state: 'INTAKE_CONSENT',
+        scheduled_call_time_utc: parsed.date ? parsed.date.toISOString() : null,
+        raw_time_text: text,
+        intake: timeIntake,
+      });
+      if (!Array.isArray(claimTime.data) || claimTime.data.length === 0) {
+        console.error(`[Flow] ${from} — time→consent claim failed (status ${claimTime.status}) — not sending`);
+        return;
+      }
+      const timeEcho = normalizeTimeEcho(text, parsed.kind, parsed.date, tz);
+      const timeReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+      const tmsg = `Perfect, ${timeEcho} works! Quick confirm - you're the owner of ${contact.address || 'the property'} and you're good with the call? Reply YES and you're locked in.`;
+      const rt = await sendSMS(timeReplyFrom, from, tmsg);
+      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: timeReplyFrom, to: from, text: tmsg, status: rt.ok ? 'sent' : 'failed', telnyx_id: rt.id || null, sent_at: new Date().toISOString() });
+      console.log(`[Flow] intake time captured (${parsed.kind}) → consent for ${from}`);
       return;
     }
 
