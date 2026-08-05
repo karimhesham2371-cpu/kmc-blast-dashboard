@@ -1304,6 +1304,29 @@ app.delete('/api/opt-outs/:phone', auth, async (req, res) => {
 // Per spec: prefer whichever of the AM/PM readings falls in the plausible
 // call window (8 AM–9 PM); if both or neither qualify, prefer PM (evening
 // callback is the safer default for this business).
+// Offset of `tz` from UTC (ms) at a given instant — positive east of UTC.
+function tzOffsetMs(tz, atUtcMs) {
+  const d = new Date(atUtcMs);
+  const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }).formatToParts(d);
+  const g = t => parseInt(p.find(x => x.type === t).value);
+  return Date.UTC(g('year'), g('month') - 1, g('day'), g('hour') % 24, g('minute'), g('second')) - atUtcMs;
+}
+// chrono's IANA `timezone` option silently no-ops on some runtimes — on Render
+// it parsed "Tomorrow at 2pm" (lead in ET) as 14:00 UTC, so the lead was told
+// "talk at 10 AM". We stop relying on it entirely: hand chrono a reference
+// shifted so the SERVER-local wall clock equals the LEAD's wall clock, parse
+// naive, then rebuild the true instant in the lead's timezone ourselves.
+function chronoRefFor(tz, now = new Date()) {
+  const serverOff = -now.getTimezoneOffset() * 60000;
+  return new Date(now.getTime() + tzOffsetMs(tz, now.getTime()) - serverOff);
+}
+function chronoDateToTzInstant(d, tz) {
+  const wallUtc = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), 0);
+  let inst = wallUtc - tzOffsetMs(tz, wallUtc);
+  inst = wallUtc - tzOffsetMs(tz, inst); // second pass for DST boundaries
+  return new Date(inst);
+}
+
 function resolveAmbiguousMeridiem(date, tz) {
   const hour24 = parseInt(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: tz }).format(date));
   const hour12 = hour24 % 12;
@@ -1345,7 +1368,11 @@ function parseCallbackTime(text, tz) {
   if (/\b(anytime|whenever)\b/i.test(raw)) return { kind: 'vague', date: null };
 
   const ref  = new Date();
-  const opts = { forwardDate: true, timezone: tz };
+  // Timezone handling is OURS, not chrono's (its IANA `timezone` option
+  // no-ops on some runtimes — Render turned "2pm" ET into 14:00 UTC). We give
+  // chrono a shifted reference whose server-local wall clock equals the
+  // lead's wall clock, parse naive, then rebuild the true instant.
+  const cref = chronoRefFor(tz);
 
   // "after 5" / "after 5pm" describes an open-ended window, not a fixed
   // moment — always vague, regardless of whether chrono can resolve an hour.
@@ -1353,9 +1380,9 @@ function parseCallbackTime(text, tz) {
   // other date anchor, chrono's own forward-rolling would push a still-
   // upcoming-today PM reading to tomorrow before we get to pick it.
   if (/\bafter\s+\d{1,2}\b/i.test(raw)) {
-    const r = chrono.parse(raw.replace(/\bafter\s+(\d{1,2})/i, 'from $1'), ref, { timezone: tz });
+    const r = chrono.parse(raw.replace(/\bafter\s+(\d{1,2})/i, 'from $1'), cref);
     if (!r.length) return { kind: 'vague', date: null };
-    let d = r[0].start.date();
+    let d = chronoDateToTzInstant(r[0].start.date(), tz);
     if (!r[0].start.isCertain('meridiem')) {
       d = resolveAmbiguousMeridiem(d, tz);
       if (d.getTime() <= ref.getTime()) d = new Date(d.getTime() + 86400000);
@@ -1363,7 +1390,7 @@ function parseCallbackTime(text, tz) {
     return { kind: 'vague', date: d };
   }
 
-  let results = chrono.parse(raw, ref, opts);
+  let results = chrono.parse(raw, cref, { forwardDate: true });
   // Bare hour numbers ("7", or the first number in "7 or 8") aren't parsed by
   // chrono on their own — prefixing "at " gets it to treat it as a time.
   // Deliberately no forwardDate for this fallback: with no other date anchor
@@ -1375,12 +1402,12 @@ function parseCallbackTime(text, tz) {
   // first, then only roll forward a day if the chosen reading has itself
   // already passed relative to ref.
   if (!results.length && /\b([1-9]|1[0-2])\b/.test(raw)) {
-    results = chrono.parse('at ' + raw, ref, { timezone: tz });
+    results = chrono.parse('at ' + raw, cref);
   }
   if (!results.length) return { kind: 'none', date: null };
 
   const c = results[0];
-  let date = c.start.date();
+  let date = chronoDateToTzInstant(c.start.date(), tz);
   if (!c.start.isCertain('meridiem')) {
     date = resolveAmbiguousMeridiem(date, tz);
     if (date.getTime() <= ref.getTime()) date = new Date(date.getTime() + 86400000);
@@ -1464,7 +1491,7 @@ function mapOccupied(t) {
   return null;
 }
 function mapRepairs(t) {
-  if (/^\s*1\s*\.?\s*$/.test(t) || /\b(full|gut|everything|tear ?down|major work|complete reno|falling apart)\b/i.test(t)) return 'Full Gut Renovation - Everything';
+  if (/^\s*1\s*\.?\s*$/.test(t) || /\b(full|gut|everything|tear ?down|knock ?down|demolish\w*|demolition|bulldoz\w*|condemned|major work|complete reno|falling apart|falling down)\b/i.test(t)) return 'Full Gut Renovation - Everything';
   if (/^\s*2\s*\.?\s*$/.test(t) || /\b(remodel|kitchen|bath|roof|hvac|plumbing|electric|foundation)\b/i.test(t)) return 'Remodel - Kitchen, Bathroom, Roof';
   if (/^\s*3\s*\.?\s*$/.test(t) || /\b(cosmetic|paint|floor|carpet|minor|small stuff|little|touch ?up)\b/i.test(t)) return 'Cosmetic - Flooring, Paint';
   if (/^\s*4\s*\.?\s*$/.test(t) || /\b(updated|renovated|like new|nothing|none|excellent|perfect|move.?in ready|good (condition|shape)|great (condition|shape))\b/i.test(t)) return 'Fully renovated and updated in past 2 years';
@@ -1669,6 +1696,12 @@ async function advanceFlow(from, to, type, text) {
         const asks = emailAskVariants(camp);
         const ask = asks[(contact.id || 0) % asks.length];
         if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
+        // Re-check after the sleep (see the permission-ask race note).
+        const stillEm = await sb.get('kmc_contacts', `id=eq.${contact.id}&select=flow_state`);
+        if (stillEm[0]?.flow_state !== 'AWAITING_EMAIL') {
+          console.log(`[Flow] ${from} — flow advanced past AWAITING_EMAIL during the delay (${stillEm[0]?.flow_state}), skipping obsolete email-ask`);
+          return;
+        }
         const r = await sendSMS(replyFrom, from, ask);
         await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: ask, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
         console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} email-ask${buyerType ? ' ['+buyerType+']' : ''} — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
@@ -1693,6 +1726,15 @@ async function advanceFlow(from, to, type, text) {
         }
         const permAsk = 'Great! Is it ok if I ask you a couple of questions about the property?';
         if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
+        // Re-check AFTER the sleep: a second "Yes" during the delay is read as
+        // permission-granted and advances the flow to Q1 immediately — sending
+        // the permission ask then would arrive two questions late (the Paul
+        // thread, Aug 5). If the flow moved on, this message is obsolete.
+        const still = await sb.get('kmc_contacts', `id=eq.${contact.id}&select=flow_state`);
+        if (still[0]?.flow_state !== 'INTAKE_PERMISSION') {
+          console.log(`[Flow] ${from} — flow advanced past INTAKE_PERMISSION during the delay (${still[0]?.flow_state}), skipping obsolete permission-ask`);
+          return;
+        }
         const rp = await sendSMS(replyFrom, from, permAsk);
         await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: permAsk, status: rp.ok ? 'sent' : 'failed', telnyx_id: rp.id || null, sent_at: new Date().toISOString() });
         console.log(`[Flow] ${rp.ok ? 'sent' : 'FAILED'} intake permission-ask — ${camp.name} → ${from}${rp.errDetail ? ' — ' + rp.errDetail : ''}`);
@@ -1714,6 +1756,14 @@ async function advanceFlow(from, to, type, text) {
       // on Render: this fresh webhook request resets the 15-min idle-sleep timer,
       // so a 2-min wait won't get cut short by the instance spinning down.
       if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
+      // Re-check after the sleep (see the permission-ask race note): if the
+      // lead texted again during the delay and the flow already moved on,
+      // this Message A is obsolete — don't send it out of order.
+      const stillCb = await sb.get('kmc_contacts', `id=eq.${contact.id}&select=flow_state`);
+      if (stillCb[0]?.flow_state !== 'AWAITING_CALLBACK_TIME') {
+        console.log(`[Flow] ${from} — flow advanced past AWAITING_CALLBACK_TIME during the delay (${stillCb[0]?.flow_state}), skipping obsolete Message A`);
+        return;
+      }
       const r = await sendSMS(replyFrom, from, msgA);
       await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: msgA, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
       console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} Message A — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
