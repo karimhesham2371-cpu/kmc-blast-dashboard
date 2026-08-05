@@ -1242,6 +1242,7 @@ async function refreshInbox(resetScroll = false) {
 
   updateInboxCounts();
   renderConvList(resetScroll);
+  refreshOpenThread();
 }
 
 function filterConvs(q) { inboxSearch = q.toLowerCase(); renderConvList(true); }
@@ -1324,6 +1325,52 @@ function refreshConvListInPlace() {
   renderConvList(false);
 }
 
+function threadMsgsHtml(conv, phone) {
+  return conv.messages.map(m => {
+    const out = m.dir === 'out';
+    const hasMedia = Array.isArray(m.media) && m.media.length;
+    // Media-only messages (photos, no text) used to render an empty bubble —
+    // now show a "📷 N photo(s)" label plus the images below.
+    const bubbleText = (m.text && m.text.trim()) ? esc(m.text)
+      : hasMedia ? `📷 ${m.media.length} photo${m.media.length>1?'s':''}` : '';
+    return `<div>
+      ${out ? `<div class="msg-from" style="text-align:right">${ALL_LABELS[m.from]||m.from||''}</div>` : ''}
+      <div class="msg ${out?'msg-out':'msg-in'}"
+        data-id="${m.id||''}"
+        data-dir="${m.dir}"
+        data-phone="${esc(phone)}"
+        data-text="${esc(m.text)}"
+        data-type="${m.type||''}"
+      >${bubbleText}</div>
+      ${hasMedia ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px;${out?'justify-content:flex-end':''}">
+        ${m.media.map(md => `<a href="${esc(md.url)}" target="_blank" rel="noopener" title="Open full size"><img src="${esc(md.url)}" style="width:120px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:pointer;background:var(--bg)"></a>`).join('')}
+      </div>` : ''}
+      <div class="msg-time" style="text-align:${out?'right':'left'}">${fmtTs(m.ts)}</div>
+    </div>`;
+  }).join('');
+}
+
+// Live-update the OPEN conversation after each 10s inbox poll — messages and
+// flow-state line only, never the reply bar (would clobber a half-typed
+// message). Before this, the thread froze at open-time: an auto-reply that
+// fired while you were looking showed in the sidebar preview but not in the
+// open thread (the "Yvonne bug", 2026-08-05).
+let lastThreadStamp = null;
+function refreshOpenThread() {
+  if (!activeConv) return;
+  const conv = inboxData.find(c => c.phone === activeConv);
+  const msgsEl = document.getElementById('thread-msgs');
+  if (!conv || !msgsEl) return;
+  const last = conv.messages[conv.messages.length - 1];
+  const stamp = activeConv + '|' + conv.messages.length + '|' + (last ? last.id + '@' + last.ts : '');
+  if (stamp === lastThreadStamp) return;
+  lastThreadStamp = stamp;
+  msgsEl.innerHTML = threadMsgsHtml(conv, activeConv);
+  const fl = document.getElementById('thread-flowline');
+  if (fl) fl.innerHTML = formatFlowStateLine(conv);
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
 function openConv(phone) {
   activeConv = phone;
   // Mark as read — save timestamp to localStorage
@@ -1355,30 +1402,9 @@ function openConv(phone) {
       <button class="btn btn-sm ${conv.replyType==='no'?'btn-primary':'btn-ghost'}" onclick="setConvTag('${esc(phone)}','no')">❌ Objection</button>
       <button class="btn btn-sm ${conv.replyType==='other'?'btn-primary':'btn-ghost'}" onclick="setConvTag('${esc(phone)}','other')">💬 Other</button>
     </div>` : ''}
-    ${formatFlowStateLine(conv)}
+    <div id="thread-flowline">${formatFlowStateLine(conv)}</div>
     <div class="thread-messages" id="thread-msgs">
-      ${conv.messages.map(m => {
-        const out = m.dir === 'out';
-        const hasMedia = Array.isArray(m.media) && m.media.length;
-        // Media-only messages (photos, no text) used to render an empty bubble —
-        // now show a "📷 N photo(s)" label plus the images below.
-        const bubbleText = (m.text && m.text.trim()) ? esc(m.text)
-          : hasMedia ? `📷 ${m.media.length} photo${m.media.length>1?'s':''}` : '';
-        return `<div>
-          ${out ? `<div class="msg-from" style="text-align:right">${ALL_LABELS[m.from]||m.from||''}</div>` : ''}
-          <div class="msg ${out?'msg-out':'msg-in'}"
-            data-id="${m.id||''}"
-            data-dir="${m.dir}"
-            data-phone="${esc(phone)}"
-            data-text="${esc(m.text)}"
-            data-type="${m.type||''}"
-          >${bubbleText}</div>
-          ${hasMedia ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px;${out?'justify-content:flex-end':''}">
-            ${m.media.map(md => `<a href="${esc(md.url)}" target="_blank" rel="noopener" title="Open full size"><img src="${esc(md.url)}" style="width:120px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:pointer;background:var(--bg)"></a>`).join('')}
-          </div>` : ''}
-          <div class="msg-time" style="text-align:${out?'right':'left'}">${fmtTs(m.ts)}</div>
-        </div>`;
-      }).join('')}
+      ${threadMsgsHtml(conv, phone)}
     </div>
     <div class="quick-replies" id="quick-replies" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 14px 8px">
       <button class="btn btn-ghost btn-sm" onclick="useCallbackTimeReply('${esc(phone)}')">☎️ Ask Best Callback Time</button>
