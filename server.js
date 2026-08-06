@@ -951,6 +951,7 @@ app.get('/api/inbox', auth, async (req, res) => {
       m[p].lastInboundTs = r.timestamp;
       m[p].replyType = r.type;
     }
+    if (r.type === 'yes') m[p].hasYesEver = true;
     if (r.timestamp > m[p].lastActivity) m[p].lastActivity = r.timestamp;
   }
 
@@ -973,6 +974,14 @@ app.get('/api/inbox', auth, async (req, res) => {
     // orphan contacts and deleted contact rows). null = unassigned (manual-only).
     c.campaignId = contact?.campaignId ?? c.outboundCampaignId ?? null;
     c.campaignName = c.campaignId != null ? (campaignNameById[c.campaignId] || null) : null;
+    // STICKY INTERESTED: a conversation that ever had a "yes" stays tagged
+    // Interested even as later replies (intake answers, questions) classify
+    // 'other' — flipping the badge on every reply made hot leads vanish from
+    // the Interested pill (Karim, 2026-08-06). A hard 'no'/STOP as the LATEST
+    // message still flips to Objection, and manual retags still win (they
+    // change the latest message's stored type).
+    if (c.replyType === 'other' && c.hasYesEver) c.replyType = 'yes';
+    delete c.hasYesEver;
     delete c.lastInboundTs;
     delete c.outboundCampaignId;
     delete c.lastOutboundTs;
