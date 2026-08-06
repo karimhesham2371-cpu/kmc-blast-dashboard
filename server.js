@@ -2045,7 +2045,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
         console.log(`[Flow] ${from} — consent not given (${reason}), flagged needs_human`);
         return;
       }
-      const consented = type === 'yes' || /\b(yes|yep|yeah|yup|correct|right|confirm(ed)?|ok|okay|sure|locked)\b/i.test(text);
+      const consented = type === 'yes' || /\b(yes|yep|yeah|yup|correct|right|confirm(ed)?|ok|okay|sure|locked|roger|copy that|affirmative|10-4)\b/i.test(text);
       if (!consented) {
         await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'intake_consent_unclear' });
         console.log(`[Flow] ${from} — unclear consent reply, flagged needs_human`);
