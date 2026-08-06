@@ -1591,7 +1591,13 @@ async function submitPropertyLead(contact, intake) {
 //     restarts the flow or re-sends the form link)
 // Isolated in its own try/catch, same reasoning as the old maybeAutoReply: a
 // failure here can never take down the inbound-logging step above it.
-async function advanceFlow(from, to, type, text) {
+// opts.instant: skip the 120s human-feel delay — used by the reconcile
+// rescue paths. The delay exists so LIVE replies don't look bot-instant; a
+// rescue that's already minutes-to-hours late gains nothing from it, and
+// worse, serial 120s sleeps inside the reconcile loop turned a 15-lead
+// backlog into a 30+ minute crawl that starved every later recovery stage
+// (2026-08-06 outage aftermath).
+async function advanceFlow(from, to, type, text, opts = {}) {
   try {
     const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(from)}&order=created_at.desc&limit=1`);
     let contact = contacts[0];
@@ -1696,7 +1702,7 @@ async function advanceFlow(from, to, type, text) {
         }
         const asks = emailAskVariants(camp);
         const ask = asks[(contact.id || 0) % asks.length];
-        if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
+        if (MSG_A_DELAY_MS > 0 && !opts.instant) await sleep(MSG_A_DELAY_MS);
         // Re-check after the sleep (see the permission-ask race note).
         const stillEm = await sb.get('kmc_contacts', `id=eq.${contact.id}&select=flow_state`);
         if (stillEm[0]?.flow_state !== 'AWAITING_EMAIL') {
@@ -1726,7 +1732,7 @@ async function advanceFlow(from, to, type, text) {
           return;
         }
         const permAsk = 'Great! Is it ok if I ask you a couple of questions about the property?';
-        if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
+        if (MSG_A_DELAY_MS > 0 && !opts.instant) await sleep(MSG_A_DELAY_MS);
         // Re-check AFTER the sleep: a second "Yes" during the delay is read as
         // permission-granted and advances the flow to Q1 immediately — sending
         // the permission ask then would arrive two questions late (the Paul
@@ -1756,7 +1762,7 @@ async function advanceFlow(from, to, type, text) {
       // Wait before replying so it feels human, not like an instant bot. Safe
       // on Render: this fresh webhook request resets the 15-min idle-sleep timer,
       // so a 2-min wait won't get cut short by the instance spinning down.
-      if (MSG_A_DELAY_MS > 0) await sleep(MSG_A_DELAY_MS);
+      if (MSG_A_DELAY_MS > 0 && !opts.instant) await sleep(MSG_A_DELAY_MS);
       // Re-check after the sleep (see the permission-ask race note): if the
       // lead texted again during the delay and the flow already moved on,
       // this Message A is obsolete — don't send it out of order.
@@ -2182,29 +2188,46 @@ setInterval(async () => {
 // or flag a phantom duplicate_yes for someone already CALL_SCHEDULED). This
 // is exactly the same one-time-only guarantee the old auto_replied flag gave
 // us, just expressed through flow_state instead.
+// Overlap guard: reconcile passes are fired by setInterval, which does NOT
+// wait for the previous async run. During the 2026-08-06 outage recovery,
+// overlapping passes each crawling a big backlog stacked up; claims kept them
+// from double-sending but the pile-up starved later stages for an hour.
+let reconcileInFlight = false;
 async function reconcileMissedAutoReplies() {
+  if (reconcileInFlight) { console.log('[Reconcile] previous pass still running, skipping this tick'); return; }
+  reconcileInFlight = true;
+  // STAGE ORDER MATTERS: the stalled-question backstop runs FIRST — it is the
+  // cheapest stage and the one that rescues mid-flow leads, so it must never
+  // wait behind the yes-backlog scan. Every stage is isolated in its own
+  // try/catch so one failure can't take down the others.
   try {
+    try { await reconcileStalledQuestions(); }
+    catch (e) { console.error('[Reconcile] stall stage failed:', e.message); }
+
     // Only look back 7 days — anything older is assumed either handled or
     // stale enough that the user would rather review it manually than get a
     // surprise message days later.
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const yesReplies = await sb.getAll('kmc_replies', `type=eq.yes&timestamp=gte.${since}&order=timestamp.desc`);
+    try {
+      const yesReplies = await sb.getAll('kmc_replies', `type=eq.yes&timestamp=gte.${since}&order=timestamp.desc`);
+      const seen = new Set();
+      let checked = 0, advanced = 0;
+      for (const reply of yesReplies) {
+        if (seen.has(reply.from)) continue;
+        seen.add(reply.from);
+        checked++;
 
-    const seen = new Set();
-    let checked = 0, advanced = 0;
-    for (const reply of yesReplies) {
-      if (seen.has(reply.from)) continue;
-      seen.add(reply.from);
-      checked++;
+        const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(reply.from)}&order=created_at.desc&limit=1`);
+        const contact = contacts[0];
+        if (!contact || contact.flow_state !== 'AWAITING_INTEREST') continue; // already progressed — leave alone
 
-      const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(reply.from)}&order=created_at.desc&limit=1`);
-      const contact = contacts[0];
-      if (!contact || contact.flow_state !== 'AWAITING_INTEREST') continue; // already progressed — leave alone
-
-      advanced++;
-      await advanceFlow(reply.from, reply.to, 'yes', reply.text);
-    }
-    if (checked) console.log(`[Reconcile] checked ${checked} unique "yes" repliers from the last 7 days — re-sent Message A to ${advanced} still stuck in AWAITING_INTEREST`);
+        advanced++;
+        // instant: a reconcile rescue is already late — never serialize the
+        // 120s human-feel delay across a backlog (30+ min crawls).
+        await advanceFlow(reply.from, reply.to, 'yes', reply.text, { instant: true });
+      }
+      if (checked) console.log(`[Reconcile] checked ${checked} unique "yes" repliers from the last 7 days — re-sent opener follow-up to ${advanced} still stuck in AWAITING_INTEREST`);
+    } catch (e) { console.error('[Reconcile] yes-scan stage failed:', e.message); }
 
     // Email-capture campaigns: an investor answering "wholesaler"/"cash buyer"
     // to the "which are you?" opener classifies as 'other', so the yes-only
@@ -2212,32 +2235,33 @@ async function reconcileMissedAutoReplies() {
     // replies that landed on an email-capture campaign's numbers and re-run the
     // flow for anyone still stuck in AWAITING_INTEREST. Scoped to those
     // campaigns' numbers so it never scans the (huge) seller-campaign traffic.
-    const emailCamps = await sb.get('kmc_campaigns', 'flow_type=eq.email_capture&select=id,numbers');
-    if (emailCamps.length) {
-      const nums = new Set();
-      emailCamps.forEach(c => campaignNumbers(c).forEach(n => nums.add(n)));
-      const enc = [...nums].map(encodeURIComponent).join(',');
-      const engaged = await sb.getAll('kmc_replies', `type=neq.no&to=in.(${enc})&timestamp=gte.${since}&order=timestamp.desc`);
-      const seenEc = new Set();
-      let ecChecked = 0, ecAdvanced = 0;
-      for (const reply of engaged) {
-        if (seenEc.has(reply.from)) continue;
-        seenEc.add(reply.from);
-        ecChecked++;
-        const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(reply.from)}&order=created_at.desc&limit=1`);
-        const contact = contacts[0];
-        if (!contact || contact.flow_state !== 'AWAITING_INTEREST') continue; // already progressed
-        ecAdvanced++;
-        await advanceFlow(reply.from, reply.to, reply.type, reply.text);
+    try {
+      const emailCamps = await sb.get('kmc_campaigns', 'flow_type=eq.email_capture&select=id,numbers');
+      if (emailCamps.length) {
+        const nums = new Set();
+        emailCamps.forEach(c => campaignNumbers(c).forEach(n => nums.add(n)));
+        const enc = [...nums].map(encodeURIComponent).join(',');
+        const engaged = await sb.getAll('kmc_replies', `type=neq.no&to=in.(${enc})&timestamp=gte.${since}&order=timestamp.desc`);
+        const seenEc = new Set();
+        let ecChecked = 0, ecAdvanced = 0;
+        for (const reply of engaged) {
+          if (seenEc.has(reply.from)) continue;
+          seenEc.add(reply.from);
+          ecChecked++;
+          const contacts = await sb.get('kmc_contacts', `phone=eq.${encodeURIComponent(reply.from)}&order=created_at.desc&limit=1`);
+          const contact = contacts[0];
+          if (!contact || contact.flow_state !== 'AWAITING_INTEREST') continue; // already progressed
+          ecAdvanced++;
+          await advanceFlow(reply.from, reply.to, reply.type, reply.text, { instant: true });
+        }
+        if (ecChecked) console.log(`[Reconcile] email-capture: checked ${ecChecked} engaged repliers — advanced ${ecAdvanced} still stuck in AWAITING_INTEREST`);
       }
-      if (ecChecked) console.log(`[Reconcile] email-capture: checked ${ecChecked} engaged repliers — advanced ${ecAdvanced} still stuck in AWAITING_INTEREST`);
-    }
+    } catch (e) { console.error('[Reconcile] email stage failed:', e.message); }
 
-    await reconcileStalledQuestions();
-
-    if (NUDGE_ENABLED) await sendOverdueNudges();
-  } catch (e) {
-    console.error('[Reconcile] failed:', e.message);
+    try { if (NUDGE_ENABLED) await sendOverdueNudges(); }
+    catch (e) { console.error('[Reconcile] nudge stage failed:', e.message); }
+  } finally {
+    reconcileInFlight = false;
   }
 }
 
