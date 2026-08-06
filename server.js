@@ -1512,7 +1512,7 @@ function mapHowFast(t) {
   if (/\b(30|a month|one month|1 month|few weeks|4 weeks)\b/i.test(t)) return '30 Days';
   if (/\b(60|two months|2 months)\b/i.test(t)) return '60 Days';
   if (/\b(90|three months|3 months)\b/i.test(t)) return '90 Days';
-  if (/\b(120|four months|4 months|no rush|whenever|flexible|not in a hurry|end of (the )?year)\b/i.test(t)) return '90~120 Days';
+  if (/\b(120|four months|4 months|no rush|whenever|any ?time|flexible|open|not in a hurry|end of (the )?year)\b/i.test(t)) return '90~120 Days';
   return null;
 }
 // Why-selling maps to the form's 18 checkbox reasons; multiple can match
