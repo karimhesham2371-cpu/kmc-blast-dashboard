@@ -1488,7 +1488,7 @@ function b44Req(pathname, body) {
 function mapOccupied(t) {
   if (/\b(vacant|empty|nobody|no one|unoccupied)\b/i.test(t)) return 'Vacant';
   if (/\b(rent|tenant|lease|leased|renter)/i.test(t)) return 'Tenant Occupied';
-  if (/\b(live|living|i stay|we stay|my home|our home|owner occ|me and|i'?m (in|here)|we'?re (in|here))\b/i.test(t)) return 'Owner Occupied';
+  if (/\b(liv(e|es|ed|ing)|i stay|we stay|my home|our home|owner occ\w*|me and|i'?m (in|here)|we'?re (in|here))\b/i.test(t)) return 'Owner Occupied';
   return null;
 }
 function mapRepairs(t) {
@@ -2290,7 +2290,7 @@ const STALL_EXPECTED = {
 async function reconcileStalledQuestions() {
   try {
     const states = Object.keys(STALL_EXPECTED);
-    const contacts = await sb.getAll('kmc_contacts', `flow_state=in.(${states.join(',')})&or=(needs_human.is.null,needs_human.eq.false)&campaign_id=not.is.null&select=id,phone,first_name,address,campaign_id,flow_state,assigned_from,lead_timezone,intake,scheduled_call_time_utc`);
+    const contacts = await sb.getAll('kmc_contacts', `flow_state=in.(${states.join(',')})&campaign_id=not.is.null&select=id,phone,first_name,address,campaign_id,flow_state,assigned_from,lead_timezone,intake,scheduled_call_time_utc,needs_human,needs_human_reason`);
     if (!contacts.length) return;
     const campRows = await sb.get('kmc_campaigns', 'select=id,auto_reply_enabled,numbers,flow_type,flow_config');
     const campById = {}; campRows.forEach(cp => campById[cp.id] = cp);
@@ -2308,7 +2308,20 @@ async function reconcileStalledQuestions() {
       ]);
       if (manualRows.length) continue; // human-handled override — bot stays out
       const lastOut = lastOutRows[0];
-      if (lastOut && lastOut.text.includes(exp.fp)) continue; // question was delivered — waiting on the lead
+      const delivered = lastOut && lastOut.text.includes(exp.fp);
+      if (delivered) continue; // question was delivered — waiting on the lead (and any needs_human flag is genuine)
+      // needs_human is only MEANINGFUL if the lead actually received the
+      // question their "unclear" reply supposedly answered. During an outage
+      // the question dies, the lead texts something anyway, the handler flags
+      // them unclear, and they'd be quarantined out of auto-repair forever
+      // (Joey, 2026-08-06). Question never delivered → the flag is bogus:
+      // clear it and deliver the question. Declines are the exception — never
+      // auto-clear an explicit "no".
+      if (c.needs_human) {
+        if ((c.needs_human_reason || '').includes('declined')) continue;
+        await sb.patch('kmc_contacts', `id=eq.${c.id}`, { needs_human: false, needs_human_reason: null });
+        console.log(`[StallFix] cleared bogus needs_human (${c.needs_human_reason}) for ${c.phone} — flagged while the ${c.flow_state} question was never delivered`);
+      }
       // Settle window: never race an in-flight 120s delayed send or a live
       // exchange — only step in once the thread has been quiet for 5+ min.
       const newest = Math.max(lastOut ? new Date(lastOut.sent_at).getTime() : 0, lastInRows[0] ? new Date(lastInRows[0].timestamp).getTime() : 0);
