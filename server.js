@@ -136,6 +136,25 @@ function classifyReply(text) {
   if (/\bnot ready at this time\b/i.test(t)) return 'yes';
   if (/\bwould (like|want|consider).{0,20}sell\b/i.test(t)) return 'yes';
 
+  // 11. Motivated-seller signals the earlier tiers miss. Guarded so an explicit
+  //     brush-off ("not interested", "don't want a cash offer") can't be pulled
+  //     in by a bare "offer"/"cash offer" mention. (Hard "sold/no longer own /
+  //     under contract" cases are already caught as 'no' at the top.)
+  const brushOff = /\b(not interested|not intrested|no thank|don'?t want|not selling|not looking to sell|wrong number|not for sale)\b/i.test(t);
+  if (!brushOff) {
+    if (/\bmake\b.{0,12}\boffer\b/i.test(t)) return 'yes';               // "make an offer", "make me a offer"
+    if (/\bsend\b.{0,15}\boffer\b/i.test(t)) return 'yes';               // "send me a cash offer"
+    if (/\bcash offer\b/i.test(t)) return 'yes';                         // "cash offer 300", "your cash offer?"
+    if (/\btaking offers?\b|\bopen to (an? )?offers?\b|\bentertain(ing)? offers?\b|\baccept(ing)? offers?\b|\bbest offer\b/i.test(t)) return 'yes';
+    if (/\b(depend|depends|depending) on (the |your |a )?(offer|price|number|amount)\b/i.test(t)) return 'yes';
+    if (/\bfor sale\b/i.test(t)) return 'yes';                           // "3 properties for sale", "it's for sale"
+    if (/\bintend(ing)? to sell\b|\bplan(ning)? on selling\b|\bwant(ing)? to offload\b/i.test(t)) return 'yes';
+    if (/\bwould consider\b|\bwill consider\b|\bconsider(ing)? (an? )?(offer|selling|it)\b/i.test(t)) return 'yes';
+    if (/^i do[\s.!,]*$/i.test(t)) return 'yes';                        // "I do" — I do want to sell
+    if (/\bcash is king\b/i.test(t)) return 'yes';
+    if (/\b\d{3}[.,\s]\d{3}\b/.test(t)) return 'yes';                    // 300.000 / 300 000 / 300,000 price figure
+  }
+
   return 'other';
 }
 
