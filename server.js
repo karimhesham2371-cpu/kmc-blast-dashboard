@@ -1023,6 +1023,13 @@ app.post('/api/campaigns/:id/test-send', auth, async (req, res) => {
 app.post('/api/send', auth, async (req, res) => {
   const { from, text } = req.body;
   if (!from || !req.body.to || !text) return res.status(400).json({ error: 'from, to, text required' });
+  // Optional campaign_id — lets an automated responder (e.g. the "Jake" sweep)
+  // stamp the campaign this reply belongs to, so orphan threads (leads with no
+  // contact row, or a contact row under a different campaign) still surface in
+  // the correct per-campaign Inbox. Omit → null (unchanged manual-send behavior).
+  const rawCamp = req.body.campaign_id;
+  const campaignId = (rawCamp === undefined || rawCamp === null || rawCamp === '') ? null
+    : (Number.isInteger(Number(rawCamp)) ? Number(rawCamp) : null);
   if (!ALL_SET.has(from))   return res.status(400).json({ error: 'Invalid from number' });
   // Normalize the recipient to E.164 so the Manual Send box accepts any typed
   // format ("(904) 508-6454", "904-508-6454", "9045086454", "+19045086454").
@@ -1038,9 +1045,9 @@ app.post('/api/send', auth, async (req, res) => {
   const r = await sendSMS(from, to, text);
   console.log(`[Manual] ${r.ok ? 'sent' : 'FAILED'} ${from} → ${to} | "${text.slice(0, 60)}"`);
   if (r.ok) {
-    await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'sent', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+    await sb.post('kmc_outbound', { campaign_id: campaignId, from, to, text, status: 'sent', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
   }
-  else await sb.post('kmc_outbound', { campaign_id: null, from, to, text, status: 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+  else await sb.post('kmc_outbound', { campaign_id: campaignId, from, to, text, status: 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
   res.json({ ok: r.ok, id: r.id, status: r.status, error: r.ok ? undefined : (r.errDetail || `Telnyx rejected the message (HTTP ${r.status})`) });
 });
 
