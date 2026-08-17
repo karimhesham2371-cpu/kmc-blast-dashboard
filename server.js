@@ -89,11 +89,16 @@ function classifyReply(text) {
 
   // ── NOT INTERESTED — checked first so they override any sell-intent word ──
   if (/^(no|nope|nah|never|not interested|not selling|never mind|nevermind|stop)[\s.!,?]*$/i.test(t)) return 'no';
+  if (/^no,?\s*(thanks?|thank you)\b/i.test(t)) return 'no';                 // "No thanks"
   if (/^(sold|it'?s sold|already sold)[\s.!,?🤌]*$/i.test(t)) return 'no';
-  if (/\b(already sold|no longer own|don'?t own|just sold|we sold|i sold|i('?ve| have) sold)\b/i.test(t)) return 'no';
+  if (/\b(already sold|no longer own|don'?t own|just sold|we sold|i sold|it sold|i('?ve| have) sold)\b/i.test(t)) return 'no';
   if (/\b(it'?s|it is)\s+(been\s+)?sold\b|\bhas been sold\b|\bbeen sold\b/i.test(t)) return 'no';
+  if (/\bsold\s+(it|this|that|the|last|a few|two|\d|over)\b/i.test(t)) return 'no'; // "sold it", "sold last month", "sold 2025"
+  if (/\b(remove me|take me off|delete my (number|info)|do not (text|contact))\b/i.test(t)) return 'no';
   if (/\bunder contract\b|has a contract on it/i.test(t)) return 'no';
   if (/\b(changed my mind|not interested in sell|decided not to sell)\b/i.test(t)) return 'no';
+  // Unambiguous soft-declines (only fire on clear "won't sell" intent, never on a bare "no [answer]")
+  if (/\b(won'?t sell|will not sell|not (going|planning|looking) to sell|don'?t (want|wish|plan) to sell|no longer (for sale|selling|interested)|not for sale|no interest in selling)\b/i.test(t)) return 'no';
   if (/\bstop\b.{0,10}\bstop\b/i.test(t)) return 'no'; // "stop stop stop"
 
   // ── INTERESTED ────────────────────────────────────────────────────────────
@@ -124,10 +129,12 @@ function classifyReply(text) {
   if (/\byou can call\b/i.test(t)) return 'yes';
   if (/\bcall in about\b|\bnow is good\b|\bnow works\b/i.test(t)) return 'yes';
 
-  // 8. Asking about the offer
+  // 8. Asking about the offer (a price question IS buying interest)
   if (/\bwhat.{0,15}(offer|buy|pay)\b/i.test(t)) return 'yes';
   if (/\bdo you have.{0,10}offer\b/i.test(t)) return 'yes';
-  if (/\bhow much.{0,15}(buy|offer|pay|for it)\b/i.test(t)) return 'yes';
+  if (/\bhow much\b/i.test(t)) return 'yes';                                 // bare "How much?" = interested
+  if (/\bwhat.{0,20}(worth|asking|offering|give me|pay|buy)\b/i.test(t)) return 'yes'; // "what's it worth", "what are you offering"
+  if (/\bmake (me |us )?an? offer\b|\bwhat'?s your (number|offer|price)\b/i.test(t)) return 'yes';
 
   // 9. Timeline engagement with a question ("Next month... where are you located?")
   if (/\b(next month|this month|next week|in \d+\s*(weeks?|months?|days?))\b/i.test(t) && /[?]/.test(t)) return 'yes';
@@ -140,7 +147,7 @@ function classifyReply(text) {
   //     brush-off ("not interested", "don't want a cash offer") can't be pulled
   //     in by a bare "offer"/"cash offer" mention. (Hard "sold/no longer own /
   //     under contract" cases are already caught as 'no' at the top.)
-  const brushOff = /\b(not interested|not intrested|no thank|don'?t want|not selling|not looking to sell|wrong number|not for sale)\b/i.test(t);
+  const brushOff = /\b(not interested|not intrested|no thank|don'?t want|not selling|not looking to sell|wrong number|not for sale|won'?t sell|will not sell|not going to sell|leave me alone|remove me|take me off|no longer|already sold|not planning to sell|decided not to)\b/i.test(t);
   if (!brushOff) {
     if (/\bmake\b.{0,12}\boffer\b/i.test(t)) return 'yes';               // "make an offer", "make me a offer"
     if (/\bsend\b.{0,15}\boffer\b/i.test(t)) return 'yes';               // "send me a cash offer"
@@ -153,6 +160,28 @@ function classifyReply(text) {
     if (/^i do[\s.!,]*$/i.test(t)) return 'yes';                        // "I do" — I do want to sell
     if (/\bcash is king\b/i.test(t)) return 'yes';
     if (/\b\d{3}[.,\s]\d{3}\b/.test(t)) return 'yes';                    // 300.000 / 300 000 / 300,000 price figure
+  }
+
+  // 12. PILLAR ANSWERS = an engaged seller answering our intake questions.
+  //     These were previously falling through to 'other' and burying real
+  //     sellers (occupancy / condition / timeline answers). Guarded by brushOff
+  //     so a decline that happens to mention "rented" etc. can't be pulled in.
+  if (!brushOff) {
+    // Occupancy answers
+    if (/\b(i|we)\s+live\s+(in|there)\b|\bliving\s+(in|there)\b|\bi\s+live\s+in\b|\bowner[-\s]?occupied\b|\bi occupy\b/i.test(t)) return 'yes';
+    if (/\b(it'?s|its|is|currently)?\s*\b(vacant|empty|unoccupied)\b/i.test(t)) return 'yes';
+    if (/\b(rented|renting|rental|tenant|leased|occupied|section\s?8|sec\.?\s?8)\b/i.test(t)) return 'yes';
+    // Condition answers
+    if (/\b(good|great|excellent|fair|poor|nice|solid|decent|mint|rough|bad)\s+(condition|shape)\b/i.test(t)) return 'yes';
+    if (/\b(no|needs?\s+no|doesn'?t need|does\s?not need|don'?t need)\s+(any\s+|some\s+)?(repairs?|work|nothing|anything|fixing)\b/i.test(t)) return 'yes';
+    if (/\bno repairs?\b|\bnothing needed\b|\bkeep it up\b/i.test(t)) return 'yes';
+    if (/\b(needs?|need)\s+(some\s+|a little\s+)?(work|repairs?|paint(ing)?|tlc|updating|updated|cosmetics?|roof|renovation|remodel)\b/i.test(t)) return 'yes';
+    if (/\b(remodel(ed|ing)?|renovat(ed|ing|ion)|updated|move[-\s]?in ready|turn[-\s]?key|fully renovated|new roof|rehab(bed)?|fixer([-\s]?upper)?|as[-\s]?is)\b/i.test(t)) return 'yes';
+    // Timeline answers
+    if (/\b(asap|right away|immediately|whenever|flexible|any\s?time|now)\b/i.test(t)) return 'yes';
+    if (/\b\d+\s*(calendar\s+|business\s+)?(days?|weeks?|months?)\b/i.test(t)) return 'yes'; // "30 days", "10 calendar days", "2 months"
+    if (/\b(next|this|couple|few|a)\s+(week|month|day)s?\b/i.test(t)) return 'yes';
+    if (/\bfirst of the year\b|\bend of (the )?(month|year)\b|\bby (spring|summer|fall|winter|jan|feb|march|april|may|june|july|aug)\w*\b/i.test(t)) return 'yes';
   }
 
   return 'other';
