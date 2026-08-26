@@ -1054,6 +1054,25 @@ app.get('/api/inbox', auth, async (req, res) => {
   res.json(campaignId ? convs.filter(c => c.campaignId === campaignId) : convs);
 });
 
+// Full history for ONE conversation — NO day filter. The Inbox list is windowed
+// (Today/7/30) for speed, so opening a lead only had the messages loaded for that
+// window and older threads looked like they started mid-conversation. The open
+// thread view calls this to pull the contact's COMPLETE history and render it.
+app.get('/api/thread', auth, async (req, res) => {
+  const phone = req.query.phone;
+  if (!phone) return res.status(400).json({ error: 'phone required' });
+  const enc = encodeURIComponent(phone);
+  const [inbound, outbound] = await Promise.all([
+    sb.getAll('kmc_replies',  `from=eq.${enc}&order=timestamp.asc&select=id,text,timestamp,type,to,media`),
+    sb.getAll('kmc_outbound', `to=eq.${enc}&status=neq.failed&order=sent_at.asc&select=id,text,sent_at,from`),
+  ]);
+  const messages = [
+    ...outbound.map(r => ({ id: r.id, dir: 'out', text: r.text, ts: r.sent_at, from: r.from })),
+    ...inbound.map(r  => ({ id: r.id, dir: 'in',  text: r.text, ts: r.timestamp, type: r.type, to: r.to, media: r.media || null })),
+  ].sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+  res.json({ phone, messages });
+});
+
 // Test send — preview any of the 3 variants (or auto-reply) to a single number, no contact/campaign side-effects
 app.post('/api/campaigns/:id/test-send', auth, async (req, res) => {
   const { to, variant } = req.body; // variant: 1, 2, or 3 — the message rotation variants only

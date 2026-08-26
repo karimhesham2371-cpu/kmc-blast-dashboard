@@ -283,6 +283,7 @@ let TOKEN = '';
 let currentView = 'overview';
 let inboxData = [];
 let activeConv = null;
+let fullThread = null; // {phone, messages} — complete history for the OPEN conv (no day filter)
 let inboxSearch = '';
 let inboxFilter = 'all'; // all | yes | no | unread
 let inboxRefreshTimer = null;
@@ -1350,6 +1351,34 @@ function threadMsgsHtml(conv, phone) {
   }).join('');
 }
 
+// The Inbox list is windowed (Today/7/30 days) for speed, so conv.messages only
+// holds messages from that window — older threads looked like they began
+// mid-conversation. When a conv is open we fetch its COMPLETE history via
+// /api/thread and merge it in (deduped by id), so the full thread renders even
+// though the list stays windowed. Newer poll-loaded inbox messages not yet in
+// the full fetch are still included so live replies never disappear.
+function mergedThreadMessages(conv) {
+  if (!fullThread || fullThread.phone !== conv.phone) return conv.messages;
+  const byId = new Map();
+  for (const m of fullThread.messages) byId.set(m.id, m);
+  for (const m of conv.messages) if (!byId.has(m.id)) byId.set(m.id, m);
+  return [...byId.values()].sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+}
+async function loadFullThread(phone) {
+  try {
+    const data = await apiJ(`/api/thread?phone=${encodeURIComponent(phone)}`);
+    if (activeConv !== phone) return; // user moved on before it returned
+    fullThread = { phone, messages: (data && data.messages) || [] };
+    const conv = inboxData.find(c => c.phone === phone);
+    const msgsEl = document.getElementById('thread-msgs');
+    if (conv && msgsEl) {
+      lastThreadStamp = null; // force refreshOpenThread to re-render with full history
+      msgsEl.innerHTML = threadMsgsHtml({ ...conv, messages: mergedThreadMessages(conv) }, phone);
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    }
+  } catch (e) { /* keep the windowed view if the full fetch fails */ }
+}
+
 // Live-update the OPEN conversation after each 10s inbox poll — messages and
 // flow-state line only, never the reply bar (would clobber a half-typed
 // message). Before this, the thread froze at open-time: an auto-reply that
@@ -1361,11 +1390,12 @@ function refreshOpenThread() {
   const conv = inboxData.find(c => c.phone === activeConv);
   const msgsEl = document.getElementById('thread-msgs');
   if (!conv || !msgsEl) return;
-  const last = conv.messages[conv.messages.length - 1];
-  const stamp = activeConv + '|' + conv.messages.length + '|' + (last ? last.id + '@' + last.ts : '');
+  const msgs = mergedThreadMessages(conv);
+  const last = msgs[msgs.length - 1];
+  const stamp = activeConv + '|' + msgs.length + '|' + (last ? last.id + '@' + last.ts : '');
   if (stamp === lastThreadStamp) return;
   lastThreadStamp = stamp;
-  msgsEl.innerHTML = threadMsgsHtml(conv, activeConv);
+  msgsEl.innerHTML = threadMsgsHtml({ ...conv, messages: msgs }, activeConv);
   const fl = document.getElementById('thread-flowline');
   if (fl) fl.innerHTML = formatFlowStateLine(conv);
   msgsEl.scrollTop = msgsEl.scrollHeight;
@@ -1373,6 +1403,7 @@ function refreshOpenThread() {
 
 function openConv(phone) {
   activeConv = phone;
+  if (!fullThread || fullThread.phone !== phone) fullThread = null; // drop prior conv's history
   // Mark as read — save timestamp to localStorage
   inboxReadTs[phone] = new Date().toISOString();
   localStorage.setItem('kmc_read_ts', JSON.stringify(inboxReadTs));
@@ -1404,7 +1435,7 @@ function openConv(phone) {
     </div>` : ''}
     <div id="thread-flowline">${formatFlowStateLine(conv)}</div>
     <div class="thread-messages" id="thread-msgs">
-      ${threadMsgsHtml(conv, phone)}
+      ${threadMsgsHtml({ ...conv, messages: mergedThreadMessages(conv) }, phone)}
     </div>
     <div class="quick-replies" id="quick-replies" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 14px 8px">
       <button class="btn btn-ghost btn-sm" onclick="useCallbackTimeReply('${esc(phone)}')">☎️ Ask Best Callback Time</button>
@@ -1436,6 +1467,10 @@ function openConv(phone) {
   // Scroll to bottom
   const msgs = document.getElementById('thread-msgs');
   if (msgs) msgs.scrollTop = msgs.scrollHeight;
+
+  // Pull the COMPLETE history (no day filter) and re-render the thread — so older
+  // messages clipped by the Inbox day-window still show for this open conversation.
+  loadFullThread(phone);
 }
 
 function openConvSend(phone) {
