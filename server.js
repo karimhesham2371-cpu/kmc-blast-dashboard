@@ -20,7 +20,7 @@ const WH_TOKEN   = process.env.WH_TOKEN     || 'lm-sms-2026';
 
 // ── Number registry ───────────────────────────────────────────────────────────
 // Every Telnyx number on the account, grouped by which brand/audience it was
-// bought for. All 26 live on the same messaging profile, whose webhook points
+// bought for. All 36 live on the same messaging profile, whose webhook points
 // at this server — so inbound on ANY of them lands here. Campaigns pick their
 // own pool via the `numbers` jsonb column; campaigns with no pool set keep the
 // original 6 KMC numbers (KMC_NUMBERS) so the existing seller campaign's
@@ -57,6 +57,18 @@ const NUMBER_GROUPS = [
     '+14709320125': '470-932-0125 · Atlanta GA',
     '+17869499467': '786-949-9467 · Miami FL',
     '+12109856004': '210-985-6004 · San Antonio TX',
+  }},
+  { group: 'KMC (new · 2026-08-26)', numbers: {
+    '+17864350152': '786-435-0152 · Miami FL',
+    '+17864350268': '786-435-0268 · Miami FL',
+    '+17864350345': '786-435-0345 · Miami FL',
+    '+17864359727': '786-435-9727 · Miami FL',
+    '+17865780934': '786-578-0934 · Miami FL',
+    '+17865780985': '786-578-0985 · Miami FL',
+    '+17865910225': '786-591-0225 · Miami FL',
+    '+17869050932': '786-905-0932 · Miami FL',
+    '+17869848092': '786-984-8092 · Miami FL',
+    '+17869848497': '786-984-8497 · Miami FL',
   }},
 ];
 const KMC_NUMBERS = Object.keys(NUMBER_GROUPS[0].numbers);
