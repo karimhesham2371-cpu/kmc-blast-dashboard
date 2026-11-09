@@ -1698,10 +1698,35 @@ const INTAKE_TIME_ASK = "Perfect, that's everything I need. When's a good time t
 // Deliberately conservative: ONLY occupancy. In a reply to "would you consider
 // selling", condition/timeline phrasing is too easily a price or an aside
 // ("needs to be torn down" is a teardown-land judgement call, not a condition).
+// CONDITION from an opening reply needs its OWN detector - mapRepairs must not
+// be reused here. mapRepairs answers "how's the condition?", where a bare "no"
+// means "no work needed" and returns Fully-renovated. Against a reply to "would
+// you consider selling?", "No" means NOT INTERESTED, so mapRepairs would stamp
+// every rejection as a renovated property. Same trap for bare fine/perfect/
+// none/all good/little. So: explicit property-condition language only.
+function harvestOpeningCondition(t) {
+  if (!t) return null;
+  // Teardown implies land per Karim's ruling - either way the condition
+  // question is skipped; the label just follows whether land is mentioned.
+  if (/\b(tear.?down|torn down|demolish\w*|demolition|bulldoz\w*|knock(ed)? down|condemned|scrape)\b/i.test(t))
+    return /\b(acres?|acreage|lots?|land|parcels?)\b/i.test(t) ? 'Vacant land - N/A' : 'Full Gut Renovation - Everything';
+  if (/\b(gut(ted)?|full (reno|renovation|rehab)|complete (reno|renovation|rehab)|falling (apart|down)|major work|a lot of work|lots of work|tons of work|needs everything)\b/i.test(t))
+    return 'Full Gut Renovation - Everything';
+  if (/\bneeds?\b[^.!?]{0,20}\b(work|updating|updates|repairs?|fixing|rehab|remodel\w*|new roof|roof|kitchen|bath\w*|hvac|plumbing|electric\w*|foundation)\b/i.test(t)
+      || /\b(fixer|handyman special|needs tlc)\b/i.test(t))
+    return 'Remodel - Kitchen, Bathroom, Roof';
+  if (/\b(cosmetic\w*|touch ?ups?|needs paint|minor (work|repairs)|just needs? (paint|flooring|carpet))\b/i.test(t))
+    return 'Cosmetic - Flooring, Paint';
+  if (/\b(fully (renovated|updated)|newly (renovated|remodeled)|recently (renovated|remodeled|updated)|move.?in ready|turn ?key|like new|great (condition|shape)|good (condition|shape)|excellent condition)\b/i.test(t))
+    return 'Fully renovated and updated in past 2 years';
+  return null;
+}
 function harvestOpeningIntake(text) {
   const out = {};
   const occ = mapOccupied(text || '');
   if (occ) { out.occupied = occ; out.raw_occupied = text; }
+  const cond = harvestOpeningCondition(text || '');
+  if (cond) { out.repairs_needed = cond; out.raw_repairs_needed = text; }
   return out;
 }
 // First pillar not yet captured - lets the ladder skip anything already known.
