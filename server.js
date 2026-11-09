@@ -1642,16 +1642,35 @@ function mapGoal(t) {
 // All intake copy is deliberately GSM-7 safe: no emoji, no em-dashes. A single
 // non-GSM char flips the whole message to UCS-2 (67 chars/segment instead of
 // 153), which nearly doubled per-message cost in the emoji drafts.
+// `ask` is a function of the intake gathered so far, not a fixed string: each
+// question opens by reflecting back what the lead just told us ("so you've got
+// tenants in there"), which is the single strongest signal to a seller that a
+// human read their reply. Every branch stays GSM-7 and single-segment — note
+// the straight apostrophes, a curly ' would flip the whole message to UCS-2.
 const INTAKE_FLOW = [
   { state: 'INTAKE_OCCUPIED', field: 'occupied', map: mapOccupied,
-    ask: "Are you currently living there or is it vacant, rented?" },
+    ask: () => "Appreciate it. Are you living in it at the moment, or is it rented out or sitting empty?" },
   { state: 'INTAKE_REPAIRS', field: 'repairs_needed', map: mapRepairs,
-    ask: "How's the property condition looking like, does it need any touch ups or updates?" },
+    ask: (intake = {}) => {
+      const occ = intake.occupied;
+      const lead = occ === 'Tenant Occupied' ? "Got it, so you've got tenants in there."
+                 : occ === 'Vacant'          ? "Okay so it's sitting empty."
+                 : "Got it.";
+      return `${lead} How's it looking condition-wise, anything that needs work, or is it in decent shape?`;
+    } },
   { state: 'INTAKE_SPEED', field: 'how_fast', map: mapHowFast,
-    ask: "If the number makes sense, how soon are you looking to close?" },
+    ask: (intake = {}) => {
+      // "We buy as-is" only lands if they actually flagged work needed; saying
+      // it to someone who just told us the place is turnkey reads as canned.
+      const needsWork = /^(Full Gut|Remodel|Cosmetic)/i.test(intake.repairs_needed || '');
+      return needsWork
+        ? "That helps, thanks. We buy as-is. If the number works, how soon would you want to close?"
+        : "Good to know. If the number works for you, how soon would you be looking to close?";
+    } },
   { state: 'INTAKE_GOAL', field: 'goal', map: mapGoal,
-    ask: "I see that the property is in a decent location, what got you thinking about selling if you don't mind me asking" },
+    ask: () => "Makes sense. Last thing I'll ask, what's got you thinking about selling? Just helps me know what matters most to you on this." },
 ];
+const INTAKE_TIME_ASK = "Perfect, that's everything I need. When's a good time to give you a quick call and go over the number?";
 
 // Builds and submits the PropertyLead exactly like the webform does (then
 // fires the same forwardLead backend function the site calls, best-effort).
@@ -1954,7 +1973,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
         if (parsed.kind === 'now') parsed.kind = 'vague';
         const timeEcho = normalizeTimeEcho(text, parsed.kind, parsed.date, tz);
         const q1 = INTAKE_FLOW[0];
-        const msg = `Perfect, ${timeEcho} works! While I get your file ready, 4 quick questions so I can bring you an actual number on the call. ${q1.ask}`;
+        const msg = `Perfect, ${timeEcho} works! While I get your file ready, 4 quick questions so I can bring you an actual number on the call. ${q1.ask({})}`;
         const intakeReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
         // ATOMIC CLAIM FIRST (the Kenny incident, Aug 5): the old order sent
         // Q1 and saved the state after, unchecked — one transiently failed
@@ -2044,7 +2063,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
         return;
       }
       const permReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
-      const q1msg = `Awesome! ${q1.ask}`;
+      const q1msg = q1.ask({});
       const rq = await sendSMS(permReplyFrom, from, q1msg);
       await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: permReplyFrom, to: from, text: q1msg, status: rq.ok ? 'sent' : 'failed', telnyx_id: rq.id || null, sent_at: new Date().toISOString() });
       console.log(`[Flow] ${rq.ok ? 'sent' : 'FAILED'} intake Q1 (permission granted) → ${from}`);
@@ -2075,7 +2094,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
       const stepReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
       let msg, nextState;
       if (next) {
-        msg = next.ask; nextState = next.state;
+        msg = next.ask(intake); nextState = next.state;
       } else if (contact.scheduled_call_time_utc) {
         // Legacy order (time captured BEFORE the questions — leads already
         // in-flight when the permission-first order shipped): straight to
@@ -2088,7 +2107,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
         nextState = 'INTAKE_CONSENT';
       } else {
         // Permission-first order: the time question is the natural close.
-        msg = "Last one - when's a good time to give you a quick call to go over your number?";
+        msg = INTAKE_TIME_ASK;
         nextState = 'INTAKE_TIME';
       }
       // Claim the state transition BEFORE sending (see the Q1 claim above).
@@ -2379,11 +2398,11 @@ async function reconcileMissedAutoReplies() {
 const STALL_EXPECTED = {
   AWAITING_CALLBACK_TIME: { fp: 'call back about', build: c => MSG_A_TEMPLATE.replace(/\{PROPERTY_ADDRESS\}/g, c.address || 'your property') },
   INTAKE_PERMISSION: { fp: 'ask you a couple of questions', build: () => 'Great! Is it ok if I ask you a couple of questions about the property?' },
-  INTAKE_OCCUPIED: { fp: 'is it vacant, rented', build: () => `Awesome! ${INTAKE_FLOW[0].ask}` },
-  INTAKE_REPAIRS: { fp: 'property condition looking like', build: () => INTAKE_FLOW[1].ask },
-  INTAKE_SPEED: { fp: 'how soon are you looking to close', build: () => INTAKE_FLOW[2].ask },
-  INTAKE_GOAL: { fp: 'thinking about selling', build: () => INTAKE_FLOW[3].ask },
-  INTAKE_TIME: { fp: 'go over your number', build: () => "Last one - when's a good time to give you a quick call to go over your number?" },
+  INTAKE_OCCUPIED: { fp: 'living in it at the moment', build: () => INTAKE_FLOW[0].ask({}) },
+  INTAKE_REPAIRS: { fp: 'condition-wise', build: c => INTAKE_FLOW[1].ask(c.intake || {}) },
+  INTAKE_SPEED: { fp: 'how soon would you', build: c => INTAKE_FLOW[2].ask(c.intake || {}) },
+  INTAKE_GOAL: { fp: 'thinking about selling', build: () => INTAKE_FLOW[3].ask({}) },
+  INTAKE_TIME: { fp: 'go over the number', build: () => INTAKE_TIME_ASK },
   INTAKE_CONSENT: { fp: 'Reply YES and you', build: (c, tz) => {
     const timeShort = (c.intake?.time_kind === 'specific' && c.scheduled_call_time_utc) ? formatTimeShort(new Date(c.scheduled_call_time_utc), tz) : '';
     return `That's everything! Quick confirm - you're the owner of ${c.address || 'the property'} and you're good with a call ${timeShort ? 'at ' + timeShort : 'at the time we discussed'}? Reply YES and you're locked in.`;
