@@ -418,6 +418,24 @@ function auth(req, res, next) {
   res.status(401).json({ error: 'Unauthorized' });
 }
 
+// ── /version (deliberately UNAUTHENTICATED) ───────────────────────────────────
+// Lets a deploy be verified without the dashboard password: a push only proves
+// GitHub accepted the commit, not that Render is actually running it. Compare
+// `commit` here against the local HEAD sha to confirm a deploy landed.
+// Render injects RENDER_GIT_* automatically. Exposes build/liveness facts only
+// - never config, credentials or counts.
+const BOOTED_AT = new Date().toISOString();
+app.get('/version', (_req, res) => {
+  res.json({
+    service: process.env.RENDER_SERVICE_NAME || 'kmc-blast-dashboard',
+    commit:  process.env.RENDER_GIT_COMMIT || 'unknown (not running on Render)',
+    branch:  process.env.RENDER_GIT_BRANCH || 'unknown',
+    booted_at:     BOOTED_AT,
+    uptime_seconds: Math.round(process.uptime()),
+    node:    process.version,
+  });
+});
+
 // ── CSV parser ────────────────────────────────────────────────────────────────
 function parseCSVLine(line) {
   const parts = []; let f = '', q = false;
