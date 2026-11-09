@@ -1587,17 +1587,24 @@ function mapOccupied(t) {
   return null;
 }
 function mapRepairs(t) {
-  if (/^\s*1\s*\.?\s*$/.test(t) || /\b(full|gut|everything|tear ?down|knock ?down|demolish\w*|demolition|bulldoz\w*|condemned|major work|complete reno|falling apart|falling down)\b/i.test(t)) return 'Full Gut Renovation - Everything';
-  if (/^\s*2\s*\.?\s*$/.test(t) || /\b(remodel|kitchen|bath|roof|hvac|plumbing|electric|foundation)\b/i.test(t)) return 'Remodel - Kitchen, Bathroom, Roof';
-  if (/^\s*3\s*\.?\s*$/.test(t) || /\b(cosmetic|paint|floor|carpet|minor|small stuff|little|touch ?up)\b/i.test(t)) return 'Cosmetic - Flooring, Paint';
-  if (/^\s*4\s*\.?\s*$/.test(t) || /\b(updated|renovated|like new|nothing|none|excellent|perfect|move.?in ready|good (condition|shape)|great (condition|shape))\b/i.test(t)) return 'Fully renovated and updated in past 2 years';
+  // NEGATION GUARD — must run first. The open-ended Q2 ("does it need any touch
+  // ups or updates?") invites "no it doesn't need anything", which would
+  // otherwise match the bare "need work" pattern below and be scored as a
+  // remodel. Anything that negates needing work is the good-condition bucket.
+  if (/^\s*(no|nope|nah|none)[.! ]*$/i.test(t) ||
+      /\b(no|not|nothing|doesn'?t|does not|don'?t|do not)\b[^.!?]{0,20}\b(need|require)/i.test(t))
+    return 'Fully renovated and updated in past 2 years';
+  if (/^\s*1\s*\.?\s*$/.test(t) || /\b(full|gut|everything|tear ?down|knock ?down|demolish\w*|demolition|bulldoz\w*|condemned|major work|complete reno|falling apart|falling down|a lot of work|lots of work|tons of work|needs everything)\b/i.test(t)) return 'Full Gut Renovation - Everything';
+  if (/^\s*2\s*\.?\s*$/.test(t) || /\b(remodel|kitchen|bath|roof|hvac|plumbing|electric|foundation)\b/i.test(t) || /\bneeds?\b[^.!?]{0,15}\b(work|updating|updates|repairs?|fixing|fixed|redone)\b/i.test(t) || /\b(some|a bit of|quite a bit of) work\b/i.test(t)) return 'Remodel - Kitchen, Bathroom, Roof';
+  if (/^\s*3\s*\.?\s*$/.test(t) || /\b(cosmetic\w*|paint|floor|carpet|minor|small stuff|little|touch ?ups?|few things|a few small|nothing major|not much)\b/i.test(t)) return 'Cosmetic - Flooring, Paint';
+  if (/^\s*4\s*\.?\s*$/.test(t) || /\b(updated|renovated|remodeled|like new|nothing|none|excellent|perfect|pristine|move.?in ready|turn ?key|good (condition|shape)|great (condition|shape)|decent (condition|shape)|solid|all good|it'?s fine|its fine)\b/i.test(t)) return 'Fully renovated and updated in past 2 years';
   return null;
 }
 function mapHowFast(t) {
-  if (/\b(asap|right away|immediately|now|yesterday|as soon as|fast|quick)\b/i.test(t)) return 'ASAP';
-  if (/\b(30|a month|one month|1 month|few weeks|4 weeks)\b/i.test(t)) return '30 Days';
-  if (/\b(60|two months|2 months)\b/i.test(t)) return '60 Days';
-  if (/\b(90|three months|3 months)\b/i.test(t)) return '90 Days';
+  if (/\b(asap|right away|immediately|now|yesterday|as soon as|fast|quick|soon as possible|very soon|this week)\b/i.test(t)) return 'ASAP';
+  if (/\b(30|a month|one month|1 month|next month|few weeks|4 weeks|end of (the )?month|within a month)\b/i.test(t)) return '30 Days';
+  if (/\b(60|two months|2 months|couple( of)? months|month or two)\b/i.test(t)) return '60 Days';
+  if (/\b(90|three months|3 months|few months)\b/i.test(t)) return '90 Days';
   if (/\b(120|four months|4 months|no rush|whenever|any ?time|flexible|open|not in a hurry|end of (the )?year)\b/i.test(t)) return '90~120 Days';
   return null;
 }
@@ -1637,13 +1644,13 @@ function mapGoal(t) {
 // 153), which nearly doubled per-message cost in the emoji drafts.
 const INTAKE_FLOW = [
   { state: 'INTAKE_OCCUPIED', field: 'occupied', map: mapOccupied,
-    ask: "First one - is the property vacant, rented out, or are you living in it?" },
+    ask: "Are you currently living there or is it vacant, rented?" },
   { state: 'INTAKE_REPAIRS', field: 'repairs_needed', map: mapRepairs,
-    ask: "Got it. Condition-wise, what's closest? 1) needs full renovation 2) needs remodeling (kitchen/bath/roof) 3) just cosmetics like paint/flooring 4) fully updated. Reply 1-4." },
+    ask: "How's the property condition looking like, does it need any touch ups or updates?" },
   { state: 'INTAKE_SPEED', field: 'how_fast', map: mapHowFast,
-    ask: "And if the number makes sense, how fast would you want to close - ASAP, 30, 60, or 90+ days?" },
+    ask: "If the number makes sense, how soon are you looking to close?" },
   { state: 'INTAKE_GOAL', field: 'goal', map: mapGoal,
-    ask: "And what's got you thinking about selling?" },
+    ask: "I see that the property is in a decent location, what got you thinking about selling if you don't mind me asking" },
 ];
 
 // Builds and submits the PropertyLead exactly like the webform does (then
@@ -2372,9 +2379,9 @@ async function reconcileMissedAutoReplies() {
 const STALL_EXPECTED = {
   AWAITING_CALLBACK_TIME: { fp: 'call back about', build: c => MSG_A_TEMPLATE.replace(/\{PROPERTY_ADDRESS\}/g, c.address || 'your property') },
   INTAKE_PERMISSION: { fp: 'ask you a couple of questions', build: () => 'Great! Is it ok if I ask you a couple of questions about the property?' },
-  INTAKE_OCCUPIED: { fp: 'vacant, rented out', build: () => `Awesome! ${INTAKE_FLOW[0].ask}` },
-  INTAKE_REPAIRS: { fp: 'Condition-wise', build: () => INTAKE_FLOW[1].ask },
-  INTAKE_SPEED: { fp: 'how fast would you want to close', build: () => INTAKE_FLOW[2].ask },
+  INTAKE_OCCUPIED: { fp: 'is it vacant, rented', build: () => `Awesome! ${INTAKE_FLOW[0].ask}` },
+  INTAKE_REPAIRS: { fp: 'property condition looking like', build: () => INTAKE_FLOW[1].ask },
+  INTAKE_SPEED: { fp: 'how soon are you looking to close', build: () => INTAKE_FLOW[2].ask },
   INTAKE_GOAL: { fp: 'thinking about selling', build: () => INTAKE_FLOW[3].ask },
   INTAKE_TIME: { fp: 'go over your number', build: () => "Last one - when's a good time to give you a quick call to go over your number?" },
   INTAKE_CONSENT: { fp: 'Reply YES and you', build: (c, tz) => {
