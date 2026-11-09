@@ -1690,6 +1690,30 @@ const INTAKE_FLOW = [
 ];
 const INTAKE_TIME_ASK = "Perfect, that's everything I need. When's a good time to give you a quick call and go over the number?";
 
+// ── Opening-reply harvesting ──────────────────────────────────────────────────
+// Karim's standing rule: never re-ask a pillar the seller already answered.
+// A reply to the blast often carries one ("Renting", "I'm in it", "it's empty"),
+// and before this the answer was discarded and the bot asked it again two
+// messages later - the exact bot behaviour he keeps calling out.
+// Deliberately conservative: ONLY occupancy. In a reply to "would you consider
+// selling", condition/timeline phrasing is too easily a price or an aside
+// ("needs to be torn down" is a teardown-land judgement call, not a condition).
+function harvestOpeningIntake(text) {
+  const out = {};
+  const occ = mapOccupied(text || '');
+  if (occ) { out.occupied = occ; out.raw_occupied = text; }
+  return out;
+}
+// First pillar not yet captured - lets the ladder skip anything already known.
+function nextIntakeStep(intake = {}) {
+  return INTAKE_FLOW.find(s => !intake[s.field]) || null;
+}
+// Price demands are the single most common off-script opener. Karim's ruling:
+// answer it, never quote a number, and roll straight into the permission ask -
+// which this line already contains, so it replaces the plain permission ask.
+const PRICE_DEMAND_RE = /\b(how much|what.{0,12}(offer|price|pay|give)|your offer|you (gonna|going to) give|asking|depend(s|ing)? on (the )?(amount|price|number|offer)|what.{0,4}s it worth|cash offer would be)\b/i;
+const R_PRICE = "The offer depends on a few parameters. Would you mind if I ask you a couple of quick questions, then an offer will follow shortly?";
+
 // Builds and submits the PropertyLead exactly like the webform does (then
 // fires the same forwardLead backend function the site calls, best-effort).
 async function submitPropertyLead(contact, intake) {
@@ -1863,14 +1887,23 @@ async function advanceFlow(from, to, type, text, opts = {}) {
       // question moves to the END of the intake (INTAKE_TIME), where it's
       // the natural close.
       if (camp.flow_config && camp.flow_config.sms_intake) {
+        // Harvest any pillar the seller already answered in this very reply, so
+        // the ladder can skip it instead of asking again.
+        const opening = harvestOpeningIntake(text);
         const claimPerm = await sb.patch('kmc_contacts',
           `id=eq.${contact.id}&or=(flow_state.is.null,flow_state.eq.AWAITING_INTEREST)`,
-          { flow_state: 'INTAKE_PERMISSION', auto_replied: true });
+          { flow_state: 'INTAKE_PERMISSION', auto_replied: true,
+            ...(Object.keys(opening).length ? { intake: opening } : {}) });
         if (!Array.isArray(claimPerm.data) || claimPerm.data.length === 0) {
           console.log(`[Flow] ${from} — permission-ask already claimed (or claim failed), skipping duplicate`);
           return;
         }
-        const permAsk = 'Great! Is it ok if I ask you a couple of questions about the property?';
+        if (Object.keys(opening).length) console.log(`[Flow] ${from} — harvested from opening reply: ${JSON.stringify(opening)}`);
+        // If they demanded a price, answer that instead of ignoring it. R_PRICE
+        // carries its own permission ask, so the flow still lands on the same state.
+        const permAsk = PRICE_DEMAND_RE.test(text)
+          ? R_PRICE
+          : 'Great! Is it ok if I ask you a couple of questions about the property?';
         if (MSG_A_DELAY_MS > 0 && !opts.instant) await sleep(MSG_A_DELAY_MS);
         // Re-check AFTER the sleep: a second "Yes" during the delay is read as
         // permission-granted and advances the flow to Q1 immediately — sending
@@ -2062,26 +2095,42 @@ async function advanceFlow(from, to, type, text, opts = {}) {
     // opens the intake. A YES starts Q1; a no / question / anything unclear
     // goes to a human.
     if (contact.flow_state === 'INTAKE_PERMISSION') {
+      // A price demand here is answerable (Karim's ruling), so handle it before
+      // the generic question check that would route it to a human.
+      if (PRICE_DEMAND_RE.test(text) && type !== 'no') {
+        const pf = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
+        const rp2 = await sendSMS(pf, from, R_PRICE);
+        await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: pf, to: from, text: R_PRICE, status: rp2.ok ? 'sent' : 'failed', telnyx_id: rp2.id || null, sent_at: new Date().toISOString() });
+        console.log(`[Flow] ${from} — answered price demand at permission stage`);
+        return;
+      }
       if (/\?/.test(text) || type === 'no') {
         const reason = type === 'no' ? 'intake_permission_declined' : 'intake_permission_question';
         await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: reason });
         console.log(`[Flow] ${from} — intake permission not granted (${reason}), flagged needs_human`);
         return;
       }
-      const granted = type === 'yes' || /\b(yes|yep|yeah|yup|sure|ok|okay|of course|go ahead|shoot|fine|absolutely)\b/i.test(text);
+      // Widened: "Ask" alone was flagged unclear and stalled a live lead.
+      const granted = type === 'yes'
+        || /\b(yes|yep|yeah|yup|sure|ok|okay|of course|go ahead|shoot|fine|absolutely|alright|please do|no problem|sure thing|fire away|ask away|go for it|why not)\b/i.test(text)
+        || /^\s*(ask|k|y)\b/i.test(text);
       if (!granted) {
         await sb.patch('kmc_contacts', `id=eq.${contact.id}`, { needs_human: true, needs_human_reason: 'intake_permission_unclear' });
         console.log(`[Flow] ${from} — unclear intake permission reply, flagged needs_human`);
         return;
       }
-      const q1 = INTAKE_FLOW[0];
-      const claimPermQ1 = await sb.patch('kmc_contacts', `id=eq.${contact.id}&flow_state=eq.INTAKE_PERMISSION`, { flow_state: q1.state, intake: {} });
+      // Preserve anything harvested from the opening reply (this used to be
+      // reset to {}, which silently threw the harvest away) and start the
+      // ladder at the first pillar we don't already have.
+      const priorIntakeP = contact.intake || {};
+      const q1 = nextIntakeStep(priorIntakeP) || INTAKE_FLOW[0];
+      const claimPermQ1 = await sb.patch('kmc_contacts', `id=eq.${contact.id}&flow_state=eq.INTAKE_PERMISSION`, { flow_state: q1.state, intake: priorIntakeP });
       if (!Array.isArray(claimPermQ1.data) || claimPermQ1.data.length === 0) {
         console.error(`[Flow] ${from} — permission→Q1 claim failed (status ${claimPermQ1.status}) — not sending`);
         return;
       }
       const permReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
-      const q1msg = q1.ask({});
+      const q1msg = q1.ask(priorIntakeP);
       const rq = await sendSMS(permReplyFrom, from, q1msg);
       await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: permReplyFrom, to: from, text: q1msg, status: rq.ok ? 'sent' : 'failed', telnyx_id: rq.id || null, sent_at: new Date().toISOString() });
       console.log(`[Flow] ${rq.ok ? 'sent' : 'FAILED'} intake Q1 (permission granted) → ${from}`);
