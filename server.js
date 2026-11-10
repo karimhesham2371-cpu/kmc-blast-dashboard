@@ -398,14 +398,55 @@ function sendSMS(from, to, text) {
         try {
           const j = JSON.parse(d);
           const errDetail = j?.errors?.map(e => e.detail || e.title).join('; ');
-          if (errDetail) console.error(`[Telnyx ${res.statusCode}] from:${from} to:${to} → ${errDetail}`);
-          resolve({ ok: res.statusCode === 200, id: j?.data?.id, status: res.statusCode, errDetail });
+          const errCode   = j?.errors?.[0]?.code != null ? String(j.errors[0].code) : undefined;
+          if (errDetail) console.error(`[Telnyx ${res.statusCode}] from:${from} to:${to} → ${errCode || '?'} ${errDetail}`);
+          resolve({ ok: res.statusCode === 200, id: j?.data?.id, status: res.statusCode, errDetail, errCode });
         }
         catch { console.error(`[Telnyx ${res.statusCode}] from:${from} to:${to} → unparseable body: ${d.slice(0,200)}`); resolve({ ok: false, status: res.statusCode }); }
       });
     });
     req.on('error', e => resolve({ ok: false, error: e.message }));
     req.write(body); req.end();
+  });
+}
+
+// 2026-11-10: on 11/10 the balance hit zero mid-blast and runBlast kept POSTing
+// for 40 more minutes — 667 contacts rejected 667/667, every one stamped
+// status='failed' (so frozen out of the pending pool forever) with the Telnyx
+// error discarded, which made a dry-balance reject indistinguishable from a dead
+// number. These three pieces fix that: read the balance, tag the error, and stop.
+
+// kmc_outbound has no error_code column (and adding one needs DDL we can't do
+// over PostgREST), but telnyx_id is a text column that is always NULL on a
+// failure — so the error rides there behind an ERR: prefix. A real id is a UUID,
+// so the two can never be confused. To migrate to a proper column later:
+//   ALTER TABLE kmc_outbound ADD COLUMN error_code text;
+const sendTag = r => r.ok
+  ? (r.id || null)
+  : `ERR:${r.errCode || r.status || 'net'}${r.errDetail ? ' ' + r.errDetail.slice(0, 120) : ''}`;
+
+const BALANCE_FLOOR = Number(process.env.BALANCE_FLOOR || 1.50);
+
+function telnyxBalance() {
+  return new Promise(resolve => {
+    const req = https.request({
+      hostname: 'api.telnyx.com', path: '/v2/balance', method: 'GET',
+      headers: { Authorization: `Bearer ${TELNYX_KEY}` },
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        try {
+          const b = Number(JSON.parse(d)?.data?.balance);
+          resolve(Number.isFinite(b) ? b : null);
+        } catch { resolve(null); }
+      });
+    });
+    // A balance we cannot read resolves null, and callers treat null as "don't
+    // know" and proceed — a Telnyx blip must not silently halt the campaign.
+    req.on('error', () => resolve(null));
+    req.setTimeout(10000, () => { req.destroy(); resolve(null); });
+    req.end();
   });
 }
 
@@ -857,6 +898,16 @@ async function runBlast(campaign) {
       return { sent: 0, reason: sendWindowBlockedMessage() };
     }
 
+    // Don't start a run we can't pay for. Every POST past zero is a contact
+    // burned for nothing.
+    const bal0 = await telnyxBalance();
+    if (bal0 !== null && bal0 < BALANCE_FLOOR) {
+      const msg = `blast halted: Telnyx balance $${bal0.toFixed(2)} is below the $${BALANCE_FLOOR.toFixed(2)} floor`;
+      console.error(`[Blast] "${campaign.name}" → ${msg}`);
+      await sb.patch('kmc_campaigns', `id=eq.${id}`, { status: 'paused', updated_at: new Date().toISOString() });
+      return { sent: 0, reason: msg };
+    }
+
     const pending = await sb.getUpTo('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&order=created_at.asc`, cap);
     if (!pending.length) {
       await sb.patch('kmc_campaigns', `id=eq.${id}`, { status: 'completed', updated_at: new Date().toISOString() });
@@ -868,6 +919,12 @@ async function runBlast(campaign) {
 
     const optOuts = new Set((await sb.getAll('kmc_opt_outs', 'select=phone')).map(r => r.phone));
     let sent = 0, failed = 0, ni = 0;
+    // A dead number fails on its own; the whole account failing in a row means
+    // something systemic (dry balance, rate-limit wipeout, suspended number).
+    // Track the current losing streak so we can both stop AND hand those
+    // contacts back — they were never really contacted.
+    let streak = [], haltReason = null;
+    const STREAK_LIMIT = 8;
 
     for (const contact of pending) {
       // Re-check the send window on every iteration too, in case a long-running blast
@@ -895,11 +952,26 @@ async function runBlast(campaign) {
       const st = r.ok ? 'sent' : 'failed';
 
       await Promise.all([
-        sb.post('kmc_outbound', { campaign_id: id, from, to: contact.phone, text, status: st, telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+        sb.post('kmc_outbound', { campaign_id: id, from, to: contact.phone, text, status: st, telnyx_id: sendTag(r), sent_at: new Date().toISOString() }),
         sb.patch('kmc_contacts', `id=eq.${contact.id}`, { status: st, sent_at: new Date().toISOString(), assigned_from: from, message_variant: variantIdx + 1 }),
       ]);
 
       if (r.ok) sent++; else failed++;
+
+      if (r.ok) streak = [];
+      else {
+        streak.push(contact.id);
+        if (streak.length >= STREAK_LIMIT) {
+          const bal = await telnyxBalance();
+          if (bal !== null && bal < BALANCE_FLOOR) {
+            haltReason = `Telnyx balance $${bal.toFixed(2)} below the $${BALANCE_FLOOR.toFixed(2)} floor`;
+          } else {
+            haltReason = `${STREAK_LIMIT} consecutive failures (last: ${r.errCode || r.status || 'network'}` +
+                         `${r.errDetail ? ' ' + r.errDetail.slice(0, 80) : ''})`;
+          }
+          break;
+        }
+      }
       // Persist sent_today after every message (not just at the end) so the cap
       // reflects live progress even if the process restarts or crashes mid-blast.
       await sb.patch('kmc_campaigns', `id=eq.${id}`, {
@@ -907,6 +979,19 @@ async function runBlast(campaign) {
       });
       // Human-like jitter: 1.8s-2.8s between sends instead of a fixed robotic cadence
       await sleep(1800 + Math.floor(Math.random() * 1000));
+    }
+
+    if (haltReason) {
+      // The streak that tripped the breaker was the account failing, not those
+      // numbers. Hand them back to the pending pool so the next run picks them
+      // up, and pause so a cron doesn't just walk into the same wall.
+      if (streak.length) {
+        await sb.patch('kmc_contacts', `id=in.(${streak.join(',')})`, { status: 'pending', sent_at: null });
+      }
+      await sb.patch('kmc_campaigns', `id=eq.${id}`, { status: 'paused', updated_at: new Date().toISOString() });
+      console.error(`[Blast] "${campaign.name}" → HALTED: ${haltReason}. ` +
+                    `sent:${sent} failed:${failed}, ${streak.length} contacts returned to pending, campaign paused.`);
+      return { sent, failed, halted: true, requeued: streak.length, reason: haltReason };
     }
 
     console.log(`[Blast] "${campaign.name}" → sent:${sent} failed:${failed}`);
@@ -1142,9 +1227,9 @@ app.post('/api/send', auth, async (req, res) => {
   const r = await sendSMS(from, to, text);
   console.log(`[Manual] ${r.ok ? 'sent' : 'FAILED'} ${from} → ${to} | "${text.slice(0, 60)}"`);
   if (r.ok) {
-    await sb.post('kmc_outbound', { campaign_id: campaignId, from, to, text, status: 'sent', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+    await sb.post('kmc_outbound', { campaign_id: campaignId, from, to, text, status: 'sent', telnyx_id: sendTag(r), sent_at: new Date().toISOString() });
   }
-  else await sb.post('kmc_outbound', { campaign_id: campaignId, from, to, text, status: 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+  else await sb.post('kmc_outbound', { campaign_id: campaignId, from, to, text, status: 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() });
   res.json({ ok: r.ok, id: r.id, status: r.status, error: r.ok ? undefined : (r.errDetail || `Telnyx rejected the message (HTTP ${r.status})`) });
 });
 
@@ -1898,7 +1983,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
           return;
         }
         const r = await sendSMS(replyFrom, from, ask);
-        await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: ask, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+        await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: ask, status: r.ok ? 'sent' : 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() });
         console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} email-ask${buyerType ? ' ['+buyerType+']' : ''} — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
         return;
       }
@@ -1940,7 +2025,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
           return;
         }
         const rp = await sendSMS(replyFrom, from, permAsk);
-        await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: permAsk, status: rp.ok ? 'sent' : 'failed', telnyx_id: rp.id || null, sent_at: new Date().toISOString() });
+        await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: permAsk, status: rp.ok ? 'sent' : 'failed', telnyx_id: sendTag(rp), sent_at: new Date().toISOString() });
         console.log(`[Flow] ${rp.ok ? 'sent' : 'FAILED'} intake permission-ask — ${camp.name} → ${from}${rp.errDetail ? ' — ' + rp.errDetail : ''}`);
         return;
       }
@@ -1969,7 +2054,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
         return;
       }
       const r = await sendSMS(replyFrom, from, msgA);
-      await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: msgA, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+      await sb.post('kmc_outbound', { campaign_id: camp.id, from: replyFrom, to: from, text: msgA, status: r.ok ? 'sent' : 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() });
       console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} Message A — ${camp.name} → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
       return;
     }
@@ -2015,7 +2100,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
 
       const doneMsg = cfg.email_done || EMAIL_DONE_DEFAULT;
       const r = await sendSMS(replyFrom, from, doneMsg);
-      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: from, text: doneMsg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: from, text: doneMsg, status: r.ok ? 'sent' : 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() });
       console.log(`[Flow] email captured ${email} → pitch email sent → ${r.ok ? 'sent' : 'FAILED'} confirmation SMS → ${from}`);
       return;
     }
@@ -2068,7 +2153,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
           return;
         }
         const r = await sendSMS(intakeReplyFrom, from, msg);
-        await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: intakeReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+        await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: intakeReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() });
         console.log(`[Flow] ${r.ok ? 'sent' : 'FAILED'} intake Q1 (occupied) → ${from}${r.errDetail ? ' — ' + r.errDetail : ''}`);
         return;
       }
@@ -2105,7 +2190,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
 
       const r = await sendSMS(replyFrom, from, msg);
       await Promise.all([
-        sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+        sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() }),
         sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
           flow_state: 'CALL_SCHEDULED',
           scheduled_call_time_utc: parsed.date ? parsed.date.toISOString() : null,
@@ -2125,7 +2210,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
       if (PRICE_DEMAND_RE.test(text) && type !== 'no') {
         const pf = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
         const rp2 = await sendSMS(pf, from, R_PRICE);
-        await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: pf, to: from, text: R_PRICE, status: rp2.ok ? 'sent' : 'failed', telnyx_id: rp2.id || null, sent_at: new Date().toISOString() });
+        await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: pf, to: from, text: R_PRICE, status: rp2.ok ? 'sent' : 'failed', telnyx_id: sendTag(rp2), sent_at: new Date().toISOString() });
         console.log(`[Flow] ${from} — answered price demand at permission stage`);
         return;
       }
@@ -2157,7 +2242,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
       const permReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
       const q1msg = q1.ask(priorIntakeP);
       const rq = await sendSMS(permReplyFrom, from, q1msg);
-      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: permReplyFrom, to: from, text: q1msg, status: rq.ok ? 'sent' : 'failed', telnyx_id: rq.id || null, sent_at: new Date().toISOString() });
+      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: permReplyFrom, to: from, text: q1msg, status: rq.ok ? 'sent' : 'failed', telnyx_id: sendTag(rq), sent_at: new Date().toISOString() });
       console.log(`[Flow] ${rq.ok ? 'sent' : 'FAILED'} intake Q1 (permission granted) → ${from}`);
       return;
     }
@@ -2211,7 +2296,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
         return;
       }
       const r = await sendSMS(stepReplyFrom, from, msg);
-      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: stepReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: stepReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() });
       console.log(`[Flow] intake ${step.field}="${mapped}" → ${nextState} for ${from}`);
       return;
     }
@@ -2242,7 +2327,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
       const timeReplyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : to;
       const tmsg = `Perfect, ${timeEcho} works! Quick confirm - you're the owner of ${contact.address || 'the property'} and you're good with the call? Reply YES and you're locked in.`;
       const rt = await sendSMS(timeReplyFrom, from, tmsg);
-      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: timeReplyFrom, to: from, text: tmsg, status: rt.ok ? 'sent' : 'failed', telnyx_id: rt.id || null, sent_at: new Date().toISOString() });
+      await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: timeReplyFrom, to: from, text: tmsg, status: rt.ok ? 'sent' : 'failed', telnyx_id: sendTag(rt), sent_at: new Date().toISOString() });
       console.log(`[Flow] intake time captured (${parsed.kind}) → consent for ${from}`);
       return;
     }
@@ -2288,7 +2373,7 @@ async function advanceFlow(from, to, type, text, opts = {}) {
       const msg = `You're all set${timeShort ? ' - talk at ' + timeShort : ''}! Keep an eye out for our call.`;
       const r = await sendSMS(consentReplyFrom, from, msg);
       await Promise.all([
-        sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: consentReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() }),
+        sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: consentReplyFrom, to: from, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() }),
         sb.patch('kmc_contacts', `id=eq.${contact.id}`, {
           intake: { ...intake, consent_text: text, consent_at: new Date().toISOString(), intake_complete: true, form_submitted: !!(sub && sub.ok), b44_lead_id: sub?.data?.id || null },
           ...((sub && !sub.ok) ? { needs_human: true, needs_human_reason: 'form_submit_failed' } : {}),
@@ -2543,7 +2628,7 @@ async function reconcileStalledQuestions() {
       const msg = exp.build(c, tz);
       const fromNum = (c.assigned_from && ALL_SET.has(c.assigned_from)) ? c.assigned_from : campaignNumbers(camp)[0];
       const r = await sendSMS(fromNum, c.phone, msg);
-      await sb.post('kmc_outbound', { campaign_id: c.campaign_id, from: fromNum, to: c.phone, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+      await sb.post('kmc_outbound', { campaign_id: c.campaign_id, from: fromNum, to: c.phone, text: msg, status: r.ok ? 'sent' : 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() });
       sent++;
       console.log(`[StallFix] ${r.ok ? 'resent' : 'RESEND FAILED'} ${c.flow_state} question → ${c.phone}`);
     }
@@ -2575,7 +2660,7 @@ async function sendOverdueNudges() {
 
     const replyFrom = contact.assigned_from && ALL_SET.has(contact.assigned_from) ? contact.assigned_from : KMC_NUMBERS[0];
     const r = await sendSMS(replyFrom, contact.phone, NUDGE_TEXT);
-    await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: contact.phone, text: NUDGE_TEXT, status: r.ok ? 'sent' : 'failed', telnyx_id: r.id || null, sent_at: new Date().toISOString() });
+    await sb.post('kmc_outbound', { campaign_id: contact.campaign_id, from: replyFrom, to: contact.phone, text: NUDGE_TEXT, status: r.ok ? 'sent' : 'failed', telnyx_id: sendTag(r), sent_at: new Date().toISOString() });
     console.log(`[Nudge] ${r.ok ? 'sent' : 'FAILED'} → ${contact.phone}`);
   }
 }
