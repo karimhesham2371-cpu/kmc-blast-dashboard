@@ -95,9 +95,38 @@ const STOP_RE     = /^(stop|unsubscribe|quit|cancel|end|remove me|opt.?out)[\s.!
 //   'no'    → not interested / already sold / hard objection
 //   'other' → unclear / hostile / unrelated — no flow action, human reviews
 // STOP_RE (true opt-out) is always tested BEFORE this function is called.
+// ── Inbound marketing / solicitation ─────────────────────────────────────────
+// 2026-11-10: the "Interested" pill was inflated because B2B spam sent TO our
+// fleet numbers scored 'yes'. Rule 5 (any price anchor) and rule 6 (any phone
+// number in the body) fire on things like:
+//   "Maximum Funding Limit: $750K ... Monthly Payment Programs"
+//   "1,500 fresh Exclusive Leads are live! Use Coupons (24h): FIRE75 = $75/lead"
+//   "it's Arthur the Developer from BuildUp ... one grand prize live at our Black Friday"
+// Five such numbers sat in the Interested count, so 82 "interested" was really 77.
+// A URL alone is NOT spam - real sellers send Zillow links ("You can see the
+// pictures on zillow") - so a link only counts alongside sales language.
+function isSolicitation(text) {
+  const t = (text || '').trim();
+  if (!t) return false;
+  const hasLink = /\b(https?:\/\/|www\.)\S+|\b\S+\.(com|net|io|co|link|site)\/\S+/i.test(t);
+  const pitch = /\b(unsubscribe|opt ?out of|click (here|below)|sign up|register (now|today|here)|book (a|your) (call|demo)|webinar|zoom:|giveaway|grand prize|free trial|promo( code)?|coupon|limited time|act now|no obligation quote|dm me|follow me)\b/i.test(t);
+  // selling TO us rather than to a homeowner
+  const b2b = /\b(fresh|exclusive|motivated seller) leads\b|\bleads? (are live|for sale|per lead)\b|\$\d+\s*\/\s*lead\b|\bper lead\b|\bcold calling\b|\bwholesalers?,? (flippers?|and agents)\b|\bclosed \d+ deals\b|\bfunding (limit|program)\b|\bmerchant cash advance\b|\bbusiness (loan|funding)\b|\bcollateral:\b|\bmonthly payment programs\b|\bwe can (help you )?(fund|finance)\b|\bgrow your business\b|\bincrease your (roi|revenue|leads)\b/i.test(t);
+  if (b2b) return true;
+  if (hasLink && pitch) return true;
+  // a mass-blast shape: multiple labelled fields + a link, e.g. "Collateral: None"
+  if (hasLink && (t.match(/^\s*\w[\w ]{2,25}:/gm) || []).length >= 2) return true;
+  return false;
+}
+
 function classifyReply(text) {
   const t = (text || '').trim();
   if (!t) return 'other';
+
+  // Spam can quote prices and phone numbers, so this must run BEFORE any
+  // 'yes' rule. 'other' keeps it out of the Interested pill without pretending
+  // it is a decline.
+  if (isSolicitation(t)) return 'other';
 
   // ── NOT INTERESTED — checked first so they override any sell-intent word ──
   if (/^(no|nope|nah|never|not interested|not selling|never mind|nevermind|stop)[\s.!,?]*$/i.test(t)) return 'no';
@@ -119,6 +148,12 @@ function classifyReply(text) {
 
   // 2. Explicit sell intent (multi-word phrases)
   if (/\b(interested in sell|want to sell|looking to sell|open to sell|plan(ning)? to sell|going to sell|ready to sell|trying to sell|need(ing)? to sell|hop(e|ing) to sell|would (like|love) to sell|still.{0,20}sell|will be sold|would sell|we('?d| would) sell|i('?d| would) sell)\b/i.test(t)) return 'yes';
+  // 2b. 2026-11-10: plain future/willing phrasings the list above missed. Real
+  //     misses from live threads: "I will sell" (Charles Holmes), "Am consider
+  //     selling" (Areli Trevino), "We are willing to sell it". Guarded by the
+  //     NOT-INTERESTED block above, so "won't sell"/"not selling" never reach here.
+  if (/\b(i|we|am|are)\b[^.?!]{0,15}\b(will|willing to|considering|consider)\b[^.?!]{0,10}\bsell/i.test(t)) return 'yes';
+  if (/^(am|i'?m)\s+consider(ing)?\s+selling/i.test(t)) return 'yes';
 
   // 3. Bare "Selling" or starts with "Selling" ("Selling market price >")
   if (/^selling\b/i.test(t) && !/\bnot selling\b/i.test(t)) return 'yes';
@@ -2426,6 +2461,19 @@ app.post('/webhook/sms', async (req, res) => {
       ]);
     } else {
       type = classifyReply(text);
+      // STRANGER GUARD (2026-11-10). Every spam number that polluted the
+      // Interested pill was someone we had NEVER texted — they found a fleet
+      // number and pitched us. A genuine seller reply always has outbound
+      // history, so a 'yes' from a number with none is not a lead. Downgrade to
+      // 'other' rather than dropping it, so nothing is silently lost.
+      if (type === 'yes') {
+        const prior = await sb.get('kmc_outbound',
+          `to=eq.${encodeURIComponent(from)}&select=id&limit=1`).catch(() => []);
+        if (!prior.length) {
+          console.log(`[Classify] 'yes' from ${from} with no outbound history -> other (stranger)`);
+          type = 'other';
+        }
+      }
       // Non-STOP objection / not-interested reply — log to kmc_declines so their
       // number is permanently skipped on any future CSV upload, same as opt-outs.
       // Uses ignore-duplicates so re-texting someone before they reply a second
