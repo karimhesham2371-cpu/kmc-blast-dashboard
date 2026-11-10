@@ -542,6 +542,62 @@ app.get('/delivery', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Why a send was REFUSED AT POST, aggregated. Rejections ride in telnyx_id as
+// `ERR:<code> <detail>` (see sendTag) because kmc_outbound has no error_code
+// column and this service has no DDL rights — adding one needs the Supabase SQL
+// editor. Until then this endpoint is the read model.
+//
+// It exists because on 2026-11-10 a 300/day campaign consumed 979 contacts: 679
+// POSTs were refused and nothing recorded why. A line-type lookup on 20 of those
+// numbers returned 16 mobile / 3 landline, so they were good contacts lost to a
+// throttle, not a dirty list — a distinction no one could make from the data.
+const TELNYX_ERR = {
+  '40300': 'Blocked — an existing block rule stops this from→to pair (prior STOP)',
+  '40301': 'Recipient has opted out of this sender',
+  '40310': 'Carrier rejected the message (often landline or unreachable handset)',
+  '10002': 'Invalid or non-routable destination number',
+  '40001': 'Malformed request',
+  '40005': 'Messaging profile missing or misconfigured',
+  '40006': 'Number not permitted to send to this destination',
+  '40012': 'Rate limit exceeded — slow down',
+  '40320': 'Destination unreachable',
+  '429':   'HTTP 429 — Telnyx throttled this account',
+};
+app.get('/rejections', auth, async (req, res) => {
+  try {
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date
+              : new Date().toISOString().slice(0, 10);
+    const rows = await sb.getAll('kmc_outbound',
+      `select=telnyx_id,status,sent_at&sent_at=gte.${day}T00:00:00Z&sent_at=lt.${day}T23:59:59Z`);
+    const accepted = rows.filter(r => r.telnyx_id && !String(r.telnyx_id).startsWith('ERR:')).length;
+    const tagged   = rows.filter(r => String(r.telnyx_id || '').startsWith('ERR:'));
+    // Rows with a NULL telnyx_id are refusals from BEFORE error tagging shipped
+    // (2026-11-10 ~16:00Z). Their reason is gone; count them, never guess them.
+    const untagged = rows.filter(r => !r.telnyx_id).length;
+    const by = {};
+    for (const r of tagged) {
+      const code = (String(r.telnyx_id).match(/^ERR:(\S+)/) || [, 'unknown'])[1];
+      by[code] = by[code] || { code, count: 0, meaning: TELNYX_ERR[code] || 'Unrecognised Telnyx code', sample: null };
+      by[code].count++;
+      if (!by[code].sample) by[code].sample = String(r.telnyx_id).slice(0, 160);
+    }
+    const reasons = Object.values(by).sort((a, b) => b.count - a.count);
+    const refused = tagged.length + untagged;
+    res.json({
+      date: day,
+      attempted: rows.length,
+      accepted,
+      refused,
+      refusal_rate: rows.length ? +(refused / rows.length * 100).toFixed(1) : null,
+      reasons,
+      unexplained: untagged,
+      note: untagged
+        ? `${untagged} refusals predate error tagging and have no recorded cause.`
+        : 'Every refusal today carries a reason code.',
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── CSV parser ────────────────────────────────────────────────────────────────
 function parseCSVLine(line) {
   const parts = []; let f = '', q = false;
@@ -938,6 +994,50 @@ function sendWindowBlockedMessage() {
   return `Sending is restricted to 9:00 AM – 6:00 PM Eastern to prevent off-hours texting. It is currently ${easternTimeLabel()}. Please try again within the allowed window.`;
 }
 
+// ── ATTEMPT BUDGET ───────────────────────────────────────────────────────────
+// daily_limit caps SUCCESSFUL sends — `if (r.ok) sent++` — not attempts. Nothing
+// capped how many CONTACTS a run could burn through to reach that number.
+//
+// 2026-11-10: a 300/day campaign consumed 979 contacts. Telnyx refused ~69% of
+// POSTs; every refusal still spent a contact off the list, none of them counted
+// toward the cap, so the loop kept pulling more until 300 landed. The day before,
+// the same list ran 300/315 (95% accepted) — the collapse was a throttle, not the
+// numbers. A Telnyx line-type lookup on 20 of the refused came back 16 mobile,
+// 3 landline, 1 ambiguous: good contacts, thrown away.
+//
+// So cap attempts as well, and when the budget runs out with the send cap unmet,
+// PAUSE and say so, because that gap is the signature of a throttle. Better to
+// stop with contacts still in hand than to grind the list down invisibly.
+const ATTEMPT_RATIO = Number(process.env.ATTEMPT_RATIO || 1.5);
+
+// The ledger is kmc_outbound. kmc_contacts.sent_at cannot be used: the breaker
+// clears it when it hands a streak back, and manual recovery clears it too, so
+// attempts vanish from that column exactly when they matter most.
+//
+// kmc_outbound also holds replies and nudges, which must NOT eat the blast
+// budget — so match on the longest literal stretch of the campaign's own
+// template, which only first-touch blasts contain.
+function blastFingerprint(message) {
+  const lits = String(message || '')
+    .split(/\{[a-z_]+\}/gi)
+    .map(s => s.replace(/[,"*()]/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(s => s.length >= 12);
+  const best = lits.sort((a, b) => b.length - a.length)[0];
+  return best ? best.slice(0, 40) : null;
+}
+
+async function attemptsToday(campaignId, message) {
+  const day = new Date().toISOString().slice(0, 10);
+  const fp  = blastFingerprint(message);
+  let qs = `select=to&campaign_id=eq.${campaignId}` +
+           `&sent_at=gte.${day}T00:00:00Z&sent_at=lt.${day}T23:59:59Z`;
+  if (fp) qs += `&text=like.*${encodeURIComponent(fp)}*`;
+  const rows = await sb.getAll('kmc_outbound', qs);
+  // With no usable fingerprint, fall back to distinct recipients — an
+  // over-count, which errs toward stopping early rather than over-sending.
+  return fp ? rows.length : new Set(rows.map(r => r.to)).size;
+}
+
 // In-flight lock — prevents two overlapping runBlast() calls for the same campaign
 // (e.g. the 10-min auto-loop firing while a manual "Blast Now" is still mid-send)
 // from each reading the same stale sent_today and both independently blasting up to
@@ -973,7 +1073,21 @@ async function runBlast(campaign) {
       return { sent: 0, reason: msg };
     }
 
-    const pending = await sb.getUpTo('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&order=created_at.asc`, cap);
+    // Attempt budget: how many contacts this campaign may still spend today,
+    // whether or not the sends land. See ATTEMPT_RATIO above.
+    const attemptCap  = Math.ceil((campaign.daily_limit || 200) * ATTEMPT_RATIO);
+    const attemptsUsed = await attemptsToday(id, campaign.message);
+    const attemptsLeft = attemptCap - attemptsUsed;
+    if (attemptsLeft <= 0) {
+      const msg = `attempt budget spent: ${attemptsUsed}/${attemptCap} contacts used for only ` +
+                  `${sentSoFar}/${campaign.daily_limit} sends — that gap means Telnyx is refusing ` +
+                  `most POSTs, so the run is stopping before it burns more of the list`;
+      console.error(`[Blast] "${campaign.name}" → ${msg}`);
+      await sb.patch('kmc_campaigns', `id=eq.${id}`, { status: 'paused', updated_at: new Date().toISOString() });
+      return { sent: 0, reason: msg };
+    }
+
+    const pending = await sb.getUpTo('kmc_contacts', `campaign_id=eq.${id}&status=eq.pending&order=created_at.asc`, Math.min(cap, attemptsLeft));
     if (!pending.length) {
       await sb.patch('kmc_campaigns', `id=eq.${id}`, { status: 'completed', updated_at: new Date().toISOString() });
       return { sent: 0, reason: 'completed' };
@@ -1059,8 +1173,16 @@ async function runBlast(campaign) {
       return { sent, failed, halted: true, requeued: streak.length, reason: haltReason };
     }
 
-    console.log(`[Blast] "${campaign.name}" → sent:${sent} failed:${failed}`);
-    return { sent, failed };
+    const spent = attemptsUsed + sent + failed;
+    console.log(`[Blast] "${campaign.name}" → sent:${sent} failed:${failed} ` +
+                `| contacts spent today ${spent}/${attemptCap}`);
+    // A run that spends far more contacts than it lands sends is the throttle
+    // signature. Surface it while there is still list left to protect.
+    if (failed > sent && failed >= 10) {
+      console.error(`[Blast] "${campaign.name}" → WARNING: ${failed} refused vs ${sent} sent ` +
+                    `this run. Check GET /rejections for the reason codes.`);
+    }
+    return { sent, failed, attempts_spent: spent, attempt_cap: attemptCap };
   } finally {
     blastingCampaigns.delete(id);
   }
