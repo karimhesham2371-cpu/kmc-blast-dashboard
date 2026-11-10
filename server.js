@@ -460,7 +460,13 @@ const sendTag = r => r.ok
   ? (r.id || null)
   : `ERR:${r.errCode || r.status || 'net'}${r.errDetail ? ' ' + r.errDetail.slice(0, 120) : ''}`;
 
-const BALANCE_FLOOR = Number(process.env.BALANCE_FLOOR || 1.50);
+// Karim 2026-11-10: lower the floor to $0.50 - he wants the campaign to keep
+// rolling rather than halt early. NOTE this is now the ONLY backstop: Telnyx
+// auto-recharge is CONFIGURED but `enabled:false` (threshold $5 / recharge $10 /
+// paypal), which is why the account reached -$0.79 and 667 sends died on 11/10.
+// If auto-recharge is ever actually switched on, this can go near zero; until
+// then $0.50 is what stands between a dip and another mass-rejection run.
+const BALANCE_FLOOR = Number(process.env.BALANCE_FLOOR || 0.50);
 
 function telnyxBalance() {
   return new Promise(resolve => {
