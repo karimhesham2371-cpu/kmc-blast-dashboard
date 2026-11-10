@@ -512,6 +512,30 @@ app.get('/version', (_req, res) => {
   });
 });
 
+// Delivery breakdown for a day (default today, ET-agnostic UTC date).
+//   /delivery?token=<DASH_PASS>&date=2026-11-10
+// 'sent' here means accepted but no receipt yet; it should fall toward zero as
+// receipts land. A large standing 'sent' bucket means DLR webhooks are NOT
+// arriving (check the Telnyx messaging profile's webhook URL).
+app.get('/delivery', auth, async (req, res) => {
+  try {
+    const day  = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date
+               : new Date().toISOString().slice(0, 10);
+    const rows = await sb.getAll('kmc_outbound',
+      `select=status,telnyx_id&sent_at=gte.${day}T00:00:00Z&sent_at=lt.${day}T23:59:59Z`);
+    const by = {};
+    for (const r of rows) by[r.status || 'null'] = (by[r.status || 'null'] || 0) + 1;
+    const acc = rows.filter(r => r.status !== 'failed').length;
+    const del = by.delivered || 0;
+    res.json({
+      date: day, total: rows.length, by_status: by,
+      accepted: acc, delivered: del,
+      delivery_rate: acc ? +(del / acc * 100).toFixed(1) : null,
+      awaiting_receipt: by.sent || 0,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── CSV parser ────────────────────────────────────────────────────────────────
 function parseCSVLine(line) {
   const parts = []; let f = '', q = false;
@@ -2438,6 +2462,39 @@ app.post('/webhook/sms', async (req, res) => {
   let from, to, type = 'other', text = '';
   try {
     const ev = req.body;
+
+    // ── DELIVERY RECEIPTS (added 2026-11-10) ─────────────────────────────────
+    // Telnyx posts message.sent / message.finalized to this same URL, and the
+    // line below used to drop everything that was not 'message.received'. So we
+    // only ever knew what Telnyx ACCEPTED at POST time, never what actually
+    // reached a handset — an accepted message that dies at the carrier looked
+    // identical to a delivered one.
+    //
+    // Status vocabulary on kmc_outbound.status:
+    //   sent        accepted by Telnyx, no receipt yet
+    //   delivered   carrier confirmed delivery
+    //   undelivered carrier rejected AFTER acceptance  (deliberately NOT
+    //               'failed': 'failed' means the POST itself was rejected, and
+    //               several queries use status=neq.failed to mean "we did send
+    //               something". Reusing it would rewrite conversation history.)
+    //   failed      Telnyx refused the POST (see sendTag for the reason)
+    const DLR = { 'message.sent': 1, 'message.finalized': 1 };
+    if (DLR[ev.data?.event_type]) {
+      const p  = ev.data.payload || {};
+      const id = p.id;
+      const st = p.to?.[0]?.status;            // delivered | delivery_failed | sending ...
+      if (!id || !st) return;
+      let next = null;
+      if (st === 'delivered') next = 'delivered';
+      else if (/fail|undeliv|expired|rejected/i.test(st)) next = 'undelivered';
+      if (!next) return;                       // transient states: ignore
+      const err = (p.errors || []).map(e => `${e.code || '?'} ${e.detail || e.title || ''}`.trim()).join('; ');
+      if (next === 'undelivered') console.error(`[DLR] ${id} -> ${st} ${err}`);
+      await sb.patch('kmc_outbound', `telnyx_id=eq.${encodeURIComponent(id)}`, { status: next })
+             .catch(e => console.error('[DLR] patch failed:', e.message));
+      return;
+    }
+
     if (ev.data?.event_type !== 'message.received') return;
     const msg  = ev.data.payload;
     from = msg.from?.phone_number;
