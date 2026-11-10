@@ -552,16 +552,17 @@ app.get('/delivery', auth, async (req, res) => {
 // numbers returned 16 mobile / 3 landline, so they were good contacts lost to a
 // throttle, not a dirty list — a distinction no one could make from the data.
 const TELNYX_ERR = {
-  '40300': 'Blocked — an existing block rule stops this from→to pair (prior STOP)',
+  // ASCII only: these strings go out as JSON and get read in terminals.
+  '40300': 'Blocked: an existing block rule stops this from/to pair (prior STOP)',
   '40301': 'Recipient has opted out of this sender',
   '40310': 'Carrier rejected the message (often landline or unreachable handset)',
   '10002': 'Invalid or non-routable destination number',
   '40001': 'Malformed request',
   '40005': 'Messaging profile missing or misconfigured',
   '40006': 'Number not permitted to send to this destination',
-  '40012': 'Rate limit exceeded — slow down',
+  '40012': 'Rate limit exceeded, slow down',
   '40320': 'Destination unreachable',
-  '429':   'HTTP 429 — Telnyx throttled this account',
+  '429':   'HTTP 429: Telnyx throttled this account',
 };
 app.get('/rejections', auth, async (req, res) => {
   try {
