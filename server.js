@@ -70,6 +70,25 @@ const NUMBER_GROUPS = [
     '+17869848092': '786-984-8092 · Miami FL',
     '+17869848497': '786-984-8497 · Miami FL',
   }},
+  // Bought 2026-11-18 for the South Florida push. Karim asked for 10 Miami numbers;
+  // Telnyx had ZERO 305s and exactly one 786 in inventory, so the agreed mix is
+  // 1x 786 (Miami-Dade) + 9x 954 (Broward / Fort Lauderdale). All 10 are ASSIGNED to
+  // 10DLC campaign 4b30019e-b83f-cf7b-0d83-d13a600c8c71 with T-Mobile ADDED; AT&T
+  // mapping was still PENDING when this group was added, so sends to AT&T handsets
+  // may be filtered until it flips. Keep this group separate so a blast can be run
+  // from the new numbers ONLY.
+  { group: 'KMC (new · 2026-11-18)', numbers: {
+    '+17869471592': '786-947-1592 · Miami FL',
+    '+19542802138': '954-280-2138 · Fort Lauderdale FL',
+    '+19544810672': '954-481-0672 · Fort Lauderdale FL',
+    '+19546974249': '954-697-4249 · Fort Lauderdale FL',
+    '+19546974822': '954-697-4822 · Fort Lauderdale FL',
+    '+19546974943': '954-697-4943 · Fort Lauderdale FL',
+    '+19547385409': '954-738-5409 · Fort Lauderdale FL',
+    '+19548720391': '954-872-0391 · Fort Lauderdale FL',
+    '+19548721334': '954-872-1334 · Fort Lauderdale FL',
+    '+19548721945': '954-872-1945 · Fort Lauderdale FL',
+  }},
 ];
 const KMC_NUMBERS = Object.keys(NUMBER_GROUPS[0].numbers);
 const KMC_SET     = new Set(KMC_NUMBERS);
