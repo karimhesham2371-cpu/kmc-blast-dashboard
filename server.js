@@ -116,6 +116,7 @@ function campaignNumbers(campaign) {
 // Verified against all five known cases, including "you're welcome to stop by" (no match,
 // because it does not START with stop).
 const STOP_RE     = /^\s*(please\s+)?(stop|unsubscribe|quit|cancel|end|remove me|opt.?out|take me off)\b(?!\s+(asking|what|wasting|trying|by|in|over))(\s*[.,!;:·-]|\s+(texting|messaging|contacting|calling|sending|emailing|msg|all|me|us|now|please|it|this|your|the|from|list)\b|\s*$)/i;
+const START_RE    = /^\s*(start|unstop|resume|subscribe|opt.?in)\s*[.,!]?\s*$/i;
 
 // ── Reply classifier ──────────────────────────────────────────────────────────
 // Replaces the old narrow YES_RE / NO_RE pair with a richer tiered function
@@ -125,6 +126,11 @@ const STOP_RE     = /^\s*(please\s+)?(stop|unsubscribe|quit|cancel|end|remove me
 //   'no'    → not interested / already sold / hard objection
 //   'other' → unclear / hostile / unrelated — no flow action, human reviews
 // STOP_RE (true opt-out) is always tested BEFORE this function is called.
+//
+// START_RE: the carrier-standard re-subscribe keywords. Karim 2026-11-18: "start = opt in".
+// Kept to the bare keyword on purpose - "start" inside a sentence ("I want to start the
+// process", "when can we start") is not a re-subscribe and must not clear a real opt-out.
+// YES is deliberately NOT here: in this flow YES means interest, not re-subscription.
 // ── Inbound marketing / solicitation ─────────────────────────────────────────
 // 2026-11-10: the "Interested" pill was inflated because B2B spam sent TO our
 // fleet numbers scored 'yes'. Rule 5 (any price anchor) and rule 6 (any phone
@@ -2669,7 +2675,21 @@ app.post('/webhook/sms', async (req, res) => {
     // dropped here, which killed the LeadMamba/investor reply loop.
     if (!from || !to || !ALL_SET.has(to)) return;
 
-    if (STOP_RE.test(text)) {
+    // START is an OPT-IN (Karim 2026-11-18: "start = opt in"). It is the carrier
+    // standard counterpart to STOP, and it was handled nowhere - Stacy Veith sent
+    // STOP then START twelve minutes later and stayed opted out until released by
+    // hand. Tested BEFORE STOP_RE so a resubscribe always wins over a stale park.
+    if (START_RE.test(text)) {
+      type = 'other';
+      await Promise.all([
+        sb.del('kmc_opt_outs', `phone=eq.${encodeURIComponent(from)}`)
+          .catch(e => console.error('[Start] opt-out delete failed:', e.message)),
+        sb.del('kmc_declines', `phone=eq.${encodeURIComponent(from)}`).catch(() => {}),
+        sb.patch('kmc_contacts', `phone=eq.${encodeURIComponent(from)}`,
+                 { status: 'pending', flow_state: null }).catch(() => {}),
+      ]);
+      console.log(`[Start] ${from} sent "${text.slice(0, 20)}" -> opt-out cleared, re-subscribed`);
+    } else if (STOP_RE.test(text)) {
       type = 'no';
       await Promise.all([
         sb.post('kmc_opt_outs', { phone: from, reason: 'STOP message', created_at: new Date().toISOString() }),
