@@ -104,7 +104,18 @@ function campaignNumbers(campaign) {
   return pool.length ? pool : KMC_NUMBERS;
 }
 
-const STOP_RE     = /^(stop|unsubscribe|quit|cancel|end|remove me|opt.?out)[\s.!,]?$/i;
+// 2026-11-18: this only matched a BARE stop, so a stop with a reason attached sailed
+// straight past it. Kyle Ristaino wrote "Stop, it's been foreclosed on. Thanks though."
+// mid-blast and was never opted out - we would have kept texting a foreclosed property.
+//
+// Now a leading stop word also counts when it is followed by punctuation, or by a word
+// about messaging. It deliberately does NOT fire when the next word makes it a complaint
+// about our QUESTIONS rather than a request to leave, which is a real distinction in the
+// history: "Stop asking me your salesman's questions" and "Stop what would u give me"
+// are both people still talking to us, and opting them out loses a live seller.
+// Verified against all five known cases, including "you're welcome to stop by" (no match,
+// because it does not START with stop).
+const STOP_RE     = /^\s*(please\s+)?(stop|unsubscribe|quit|cancel|end|remove me|opt.?out|take me off)\b(?!\s+(asking|what|wasting|trying|by|in|over))(\s*[.,!;:·-]|\s+(texting|messaging|contacting|calling|sending|emailing|msg|all|me|us|now|please|it|this|your|the|from|list)\b|\s*$)/i;
 
 // ── Reply classifier ──────────────────────────────────────────────────────────
 // Replaces the old narrow YES_RE / NO_RE pair with a richer tiered function
